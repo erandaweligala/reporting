@@ -1,0 +1,143 @@
+# USER_DATA_DUMP — the D-1 subscriber base extract
+
+A single CSV holding one row per AAA user (~3 million), describing the bundle they held on the
+previous day and how much of it they used. This note covers the shape of the run, the choices that
+make it survive that row count, and the settings an operator needs.
+
+## Where each column comes from
+
+| Columns | Source |
+| --- | --- |
+| `USER_ID`, and every column not listed below | `AAA_USER` |
+| `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, comma-joined per user with `LISTAGG` |
+| `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
+| `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
+| `UTLIZED_QUOTA` | Elasticsearch: the user's D-1 usage on the bundle's quota bucket |
+
+Column order is part of the contract with the consuming system and is asserted in
+`UserDataDumpReportDefinitionTest`. `UTLIZED_QUOTA` is spelled the way the consumer spells it.
+
+## How a run is shaped
+
+```
+        username keyspace, cut into N contiguous ranges
+        ┌───────────────┬───────────────┬───────────────┐
+shard   │   [ , "g")    │   ["g", "s")  │   ["s",  )    │
+        └───────┬───────┴───────┬───────┴───────┬───────┘
+                │               │               │
+   Oracle  ─────┤ one cursor, ORDER BY USER_NAME│
+   ES      ─────┤ composite agg, same range     │      merge-joined in step
+                │               │               │
+             dump.csv        part-1          part-2      → concatenated in shard order
+```
+
+**One query, not four.** The MAC addresses, the active bundle and its buckets are folded into the
+dump statement as pre-aggregated inline views (`UserDumpSql`). Fetching them per user would be
+three round trips per row — around nine million on a three million row dump. Each view collapses
+its table in one pass and is hash-joined; the bucket view is joined to the bundle view so the
+optimizer prunes it to the shard's own services rather than scanning `BUCKET_INSTANCE` whole.
+
+**One cursor, not pages.** Rows stream off an open, read-only, forward-only JDBC cursor with a
+5 000 row fetch size (`UserDumpRowReader`). Offset pagination — what the paged report framework
+does — re-walks and discards everything before each page, so the cost of the last page grows with
+the size of the report.
+
+**Text conversion in the database.** Timestamps and numbers are converted with `TO_CHAR` in SQL, so
+the reader pulls every column with `getString`. At three million rows the `Timestamp` and
+`BigDecimal` objects a typed read would allocate, not the I/O, are what drives the collector.
+
+**Usage merge-joined, not looked up.** Both sides are read in username order and consumed in step
+(`UserUsageCursor`). Per-user lookups would be three million Elasticsearch round trips; a
+pre-built map would cost a full aggregation scan and hundreds of megabytes before the first row
+could be written. Instead nothing is held except the row being written and the aggregation page
+being drained, so heap use is flat regardless of user count and the two scans overlap. Usage comes
+from a composite aggregation over the single `radius-sessions-yyyy.MM.dd` index for D-1 — one
+number per user per bucket over the wire, paged through `after_key`, with no scroll context left
+open on the cluster.
+
+The two orderings have to agree for the merge to work. Oracle's binary collation and
+Elasticsearch's keyword ordering both compare UTF-8 bytes: the dump session forces
+`NLS_SORT=BINARY`, and `Utf8Order` gives Java the same ordering (`String.compareTo` disagrees for
+code points above U+FFFF).
+
+**A writer that stays open.** `StreamingCsvWriter` holds one buffered handle for the life of the
+dump and formats straight into it. The batch exporter rebuilds a multi-megabyte String per batch
+and reopens the file for every append — invisible at a few thousand rows, dominant at three
+million. Values are written exactly as the database produced them; the batch exporter's habit of
+rewriting date-looking values into an Excel formula is deliberately not carried over, since a dump
+consumed by another system needs the opposite.
+
+**Shards, not threads over rows.** The username keyspace is cut into contiguous ranges
+(`UserDumpShardPlanner`) that both Oracle and Elasticsearch can filter on, so each shard is a
+genuinely independent scan on both sides. Shard 0 writes into the output file itself — it already
+carries the header — and later shards write parts that are appended with `FileChannel.transferTo`,
+inside the file system rather than through the heap. Shards run on their own pool
+(`userDumpExecutor`) so a dump cannot starve the other reports of their slots.
+
+Elasticsearch is only aggregated, never queried for hits, and only the D-1 index is named — the
+dump never touches the index cdr-service is currently writing into.
+
+## Running one
+
+`USER_DATA_DUMP` is registered like any other report type and picked up by
+`UnifiedReportDownloadServiceImpl`, which routes it down the streaming path instead of the paged
+loop. It is produced as CSV only; requesting `EXCEL` fails fast rather than attempting a
+spreadsheet of this size.
+
+## Settings
+
+```yaml
+report:
+  user-dump:
+    days-back: 1                 # 1 = D-1
+    timezone: "${TZ:UTC}"        # must match the zone the CDR daily indices are named in
+    shards: 4                    # username ranges scanned in parallel; 1 disables sharding
+    worker-threads: 0            # 0 = one thread per shard
+    jdbc-fetch-size: 5000
+    query-timeout-seconds: 7200
+    csv-buffer-bytes: 1048576
+    date-format: "DD/MM/YYYY HH24:MI:SS"
+    bandwidth-bucket-type: BANDWIDTH
+    quota-bucket-type: DATA
+    unlimited-quota-label: Unlimited
+    usage:
+      enabled: true
+      index: radius-sessions     # cdr-service `sessions-data`
+      page-size: 2000
+      buckets-per-user: 20
+      nested: true
+      instances-path: sessionInstances
+```
+
+`usage.nested` must describe how `sessionInstances` is actually mapped. Mapped as `nested`, usage
+can be summed per bucket. Mapped as a plain object, Elasticsearch flattens the array and a
+per-bucket sum would credit every bucket with the whole session's usage — so in that case the
+user's whole day is reported instead, which is wrong for a multi-bucket bundle but not silently
+wrong in the way the flattened sum would be. Fixing the mapping is the better answer.
+
+`shards` costs one Oracle cursor and one Elasticsearch aggregation each. Raising it past the
+database's appetite for concurrent full scans will slow the dump down, not speed it up; 4 is a
+starting point, not a maximum.
+
+## Assumptions worth confirming against the schema
+
+- The join key across `AAA_USER`, `AAA_USER_MAC_ADDRESS` (`USER_NAME`) and `SERVICE_INSTANCE`
+  (`USERNAME`) is the RADIUS username, and it is what the dump reports as `USER_ID` — which is
+  what the sample extract shows and what the CDR documents are keyed on.
+- `MAC_ADDRESS` is taken from `AAA_USER_MAC_ADDRESS` alongside `ORIGINAL_MAC_ADDRESS`, not from
+  `AAA_USER`. The sample extract carries three comma-separated values in both columns, which only
+  the per-MAC table can produce.
+- `BUCKET_INSTANCE.BUCKET_TYPE` distinguishes the bandwidth bucket from the data bucket, and
+  `BUCKET_ID` carries the bandwidth name (`FTTH_50Mbps` in the sample). Both type values are
+  configurable above.
+- `BUNDLE_ACTIVATION_DATE` is `SERVICE_INSTANCE.SERVICE_START_DATE` and `BUNDLE_DEACTIVATION_DATE`
+  is `EXPIRY_DATE`; where a user has held several bundles, the one active on D-1 is reported, most
+  recent first.
+
+## Indexes the dump relies on
+
+- `AAA_USER(USER_NAME)` — unique or not, it lets the ordered scan avoid a three million row sort in
+  temp space, and lets a shard range-scan its own slice.
+- `AAA_USER_MAC_ADDRESS(USER_NAME)` and `SERVICE_INSTANCE(USERNAME)` — for the shard range
+  predicates pushed into the inline views.
+- `BUCKET_INSTANCE(SERVICE_ID)` — for the join back to the active bundle.

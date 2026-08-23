@@ -15,6 +15,7 @@ class ReportDefinitionInitializerTest {
     private SessionHistoryReportDefinition session;
     private ErrorLogReportDefinition error;
     private AuditLogReportDefinition audit;
+    private UserDataDumpReportDefinition userDataDump;
 
     private ReportDefinitionInitializer initializer;
 
@@ -26,6 +27,7 @@ class ReportDefinitionInitializerTest {
         session = mock(SessionHistoryReportDefinition.class);
         error = mock(ErrorLogReportDefinition.class);
         audit = mock(AuditLogReportDefinition.class);
+        userDataDump = mock(UserDataDumpReportDefinition.class);
 
         initializer = new ReportDefinitionInitializer(
                 messageLog,
@@ -33,7 +35,8 @@ class ReportDefinitionInitializerTest {
                 product,
                 subscriber,
                 error,
-                audit
+                audit,
+                userDataDump
         );
 
     }
@@ -56,5 +59,11 @@ class ReportDefinitionInitializerTest {
 
         assertSame(error,
                 ReportDefinitionsRegistry.getDefinition("ERROR_LOGS"));
+
+        assertSame(audit,
+                ReportDefinitionsRegistry.getDefinition("AUDIT_LOGS"));
+
+        assertSame(userDataDump,
+                ReportDefinitionsRegistry.getDefinition(UserDataDumpReportDefinition.REPORT_TYPE));
     }
 }

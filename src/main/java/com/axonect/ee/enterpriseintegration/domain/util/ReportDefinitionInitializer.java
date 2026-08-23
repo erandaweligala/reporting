@@ -13,13 +13,15 @@ public class ReportDefinitionInitializer {
     private final SessionHistoryReportDefinition sessionHistoryReportDefinition;
     private final ErrorLogReportDefinition errorLogReportDefinition;
     private final AuditLogReportDefinition auditLogReportDefinition;
+    private final UserDataDumpReportDefinition userDataDumpReportDefinition;
 
     public ReportDefinitionInitializer(MessageLogReportDefinition messageLogDefinition,
                                        SessionHistoryReportDefinition sessionHistoryReportDefinition,
                                        ProductDetailsReportDefinition productDetailsReportDefinition,
                                        SubscriberDetailsReportDefinition subscriberDetailsReportDefinition,
                                        ErrorLogReportDefinition errorLogReportDefinition,
-                                       AuditLogReportDefinition auditLogReportDefinition) {
+                                       AuditLogReportDefinition auditLogReportDefinition,
+                                       UserDataDumpReportDefinition userDataDumpReportDefinition) {
 
         this.messageLogDefinition = messageLogDefinition;
         this.productDetailsReportDefinition = productDetailsReportDefinition;
@@ -27,6 +29,7 @@ public class ReportDefinitionInitializer {
         this.subscriberDetailsReportDefinition = subscriberDetailsReportDefinition;
         this.errorLogReportDefinition = errorLogReportDefinition;
         this.auditLogReportDefinition = auditLogReportDefinition;
+        this.userDataDumpReportDefinition = userDataDumpReportDefinition;
     }
 
     @PostConstruct
@@ -37,5 +40,6 @@ public class ReportDefinitionInitializer {
         ReportDefinitionsRegistry.register("PRODUCT_DETAILS", productDetailsReportDefinition);
         ReportDefinitionsRegistry.register("ERROR_LOGS", errorLogReportDefinition);
         ReportDefinitionsRegistry.register("AUDIT_LOGS", auditLogReportDefinition);
+        ReportDefinitionsRegistry.register(UserDataDumpReportDefinition.REPORT_TYPE, userDataDumpReportDefinition);
     }
 }

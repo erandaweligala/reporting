@@ -130,6 +130,27 @@
             <artifactId>httpclient</artifactId>
             <version>4.5.13</version>
         </dependency>
+
+        <!-- Elasticsearch: the user data dump aggregates a day of CDR usage out of the same
+             radius-sessions indices cdr-service writes. Pinned to the version cdr-service uses so
+             both sides speak to the cluster through an identical client. -->
+        <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+            <version>8.14.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>elasticsearch-rest-client</artifactId>
+            <version>8.14.1</version>
+        </dependency>
+        <!-- JSON-P provider the Elasticsearch client needs at runtime; Spring Boot does not
+             bring one of its own. -->
+        <dependency>
+            <groupId>org.eclipse.parsson</groupId>
+            <artifactId>parsson</artifactId>
+            <version>1.1.5</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
