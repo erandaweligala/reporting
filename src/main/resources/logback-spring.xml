@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!-- Read HOSTNAME from environment -->
+    <property name="HOSTNAME" value="${HOSTNAME:-unknown}"/>
+    <property name="LOG_PATH" value="/var/log/dte"/>
+
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36}%replace(%X{userId}){ '^(.+)$', ' - userId=$1'}%replace(%X{userName}){ '^(.+)$', ' userName=$1'} - %msg%n"/>
+
+    <!-- Console -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+    </appender>
+
+    <!-- File -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${HOSTNAME}.log</file>
+
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${HOSTNAME}.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>10</maxHistory>
+        </rollingPolicy>
+
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Suppress Kafka internal noise -->
+    <logger name="org.apache.kafka.clients.producer.ProducerConfig"                level="WARN"/>
+    <logger name="org.apache.kafka.clients.producer.KafkaProducer"                 level="WARN"/>
+    <logger name="org.apache.kafka.common.utils.AppInfoParser"                     level="WARN"/>
+    <logger name="org.apache.kafka.clients.Metadata"                               level="WARN"/>
+    <logger name="org.apache.kafka.clients.producer.internals.TransactionManager"  level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+</configuration>

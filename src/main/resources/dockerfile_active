@@ -1,0 +1,57 @@
+#FROM 10.200.140.150:5000/java-build:LANGUAGE_VERSION as builder
+#RUN java -version
+#COPY . /tmp
+#WORKDIR /tmp
+#RUN BUILD_CMD
+#FROM 10.200.140.150:5000/java-run:LANGUAGE_VERSION
+#RUN java -version ; mkdir -p /app /var/log/dte/ ; adduser -h /bin/bash -s /bin/bash -u 1100 --disabled-password dteuser
+#COPY --from=builder /tmp/MICROSERVICE_JAR_PATH/*.jar /app/MICROSERVICE_NAME.jar
+#COPY --from=builder /tmp/src/main/resources/* /app/
+#RUN chown -R dteuser:dteuser /app /var/log/dte/
+#RUN chmod -R 777 /var/log/dte/
+#USER dteuser
+#WORKDIR /home/dteuser
+#ENV JAVA_OPTS=""
+
+
+FROM 10.200.140.150:5000/java-build:21 as builder
+RUN java -version
+COPY . /tmp
+WORKDIR /tmp
+RUN BUILD_CMD
+
+#FROM amazoncorretto:21-alpine3.20-jdk
+FROM amazoncorretto:21
+
+ENV TZ=UTC
+
+RUN yum -y update-minimal --security --advisory=ALAS2-2025-3034 || \
+    yum -y update openssl openssl-libs && \
+    yum -y install shadow-utils tzdata && \
+    yum install -y tcpdump && \
+    yum install -y tar && \
+    yum install -y iproute procps-ng net-tools util-linux lsof && \
+    ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone && \
+    yum -y clean all && rm -rf /var/cache/yum
+	
+# Create user/group (uid/gid 1100)
+RUN groupadd -g 1100 dteuser && \
+    useradd  -u 1100 -g 1100 -m -s /bin/bash dteuser
+
+# Create dirs and set permissions
+RUN mkdir -p /app /var/log/dte && \
+    chown -R 1100:1100 /app /var/log/dte && \
+    chmod -R 777 /var/log/dte
+
+COPY --from=builder --chown=1100:1100 /tmp/MICROSERVICE_JAR_PATH/*.jar /app/MICROSERVICE_NAME.jar
+COPY --from=builder --chown=1100:1100 /tmp/src/main/resources/ /app/resources/
+
+# Runtime settings
+ENV JAVA_OPTS=""
+WORKDIR /home/dteuser
+USER 1100
+
+# Start command (optional; if your k8s manifest already defines command/args, you can omit)
+# CMD ["sh", "-c", "java $JAVA_OPTS -jar /app/MICROSERVICE_NAME.jar"]
+

@@ -1,0 +1,218 @@
+server:
+  port: 8082
+
+
+base-url:
+  context: /axonect/aee/templates/v1.0/base-template
+  app:
+    host: /MICROSERVICE_NAME/
+    default:
+      group-id: 1
+
+    encryption:
+      algorithm: "${ENCRYPTION_TYPE}"
+      secret-key: "${ENCRYPTION_SECRET_KEY}"
+    async:
+      core-pool-size: 50
+      max-pool-size: 200
+      queue-capacity: 10000
+      thread-name-prefix: "async-validation-"
+
+log:
+  identifierKey: UUID
+  isDebug: true
+info:
+  app:
+    name :  base-template
+    msName : base-template
+com:
+  adl:
+    dte:
+      plugins:
+        logging:
+          enabled: true
+          level: DEBUG
+        rolling:
+          policy: size
+          size: 100000kb
+        alarming:
+          enabled: true
+        msstat:
+          enabled: true
+
+springdoc:
+  packagesToScan: com.axonect.aee.template.baseapp.application.controller
+  pathsToMatch: /**
+  swagger-ui:
+    configUrl: /MICROSERVICE_NAME/v3/api-docs/swagger-config
+    url: /MICROSERVICE_NAME/v3/api-docs
+    disable-swagger-default-url: true
+  api-docs:
+    path: /v3/api-docs
+
+
+spring:
+  data:
+    redis:
+      sentinel:
+        master: "${REDIS_MASTER_NAME}"
+        nodes: redis-cluster.cluster-redis.svc.cluster.local:26379
+      password: "${REDIS_PASSWORD}"
+      timeout: 60000ms
+      lettuce:
+        pool:
+          max-active: 300
+          max-idle: 50
+          min-idle: 10
+          max-wait: 800ms
+  datasource:
+    #    url: jdbc:oracle:thin:@aaa-dev.cn8eyeqma3tp.ap-southeast-2.rds.amazonaws.com:1521/ORCL
+    #    username: aaa
+    #    password: Aaa!89nky78D
+        url: jdbc:oracle:thin:@localhost:1521/XEPDB1
+        username: "${DB_USER}"
+        password: "${DB_PASSWORD}"
+        driver-class-name: oracle.jdbc.OracleDriver
+
+        hikari:
+          maximum-pool-size: 50
+          minimum-idle: 30
+          connection-timeout: 10000
+          idle-timeout: 3000
+          max-lifetime: 180000
+          pool-name: AAAHikariPool
+          leak-detection-threshold: 60000
+
+          data-source-properties:
+            oracle.net.CONNECT_TIMEOUT: 10000
+            oracle.jdbc.ReadTimeout: 30000
+
+        jpa:
+          hibernate:
+            ddl-auto: update
+          show-sql: true
+          properties:
+            hibernate:
+              format_sql: true
+              dialect: org.hibernate.dialect.OracleDialect
+              jdbc:
+                batch_size: 20
+                fetch_size: 1000
+              order_inserts: true
+              order_updates: true
+              connection:
+                pool_size: 200
+
+  kafka:
+    bootstrap-servers:
+      dc: kafka-headless.cluster-dc.svc.cluster.local:9092
+      dr: kafka-headless.cluster-dc.svc.cluster.local:9092
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+      properties:
+        max.in.flight.requests.per.connection: 5
+        compression.type: lz4
+        batch.size: 32768
+        linger.ms: 5
+        buffer.memory: 67108864
+        delivery.timeout.ms: 8000
+        request.timeout.ms: 5000
+        max.block.ms: 5000
+
+    consumer:
+      group-id: spring-reply-group-reports   # UNIQUE
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: latest
+      enable-auto-commit: true
+      properties:
+        fetch.min.bytes: 1
+        fetch.max.wait.ms: 500
+        session.timeout.ms: 10000
+        heartbeat.interval.ms: 3000
+
+
+kafka:
+  reply:
+    topic: db-write-events-reply-reports
+  publishing:
+    topic: dc-provisioning
+  group:
+    id: spring-reply-group-reports   # UNIQUE
+
+
+
+app:
+  host: APP_BASE_PATH_PLACEHOLDER
+
+logging:
+  level:
+    org.springframework.web: INFO
+
+message-log:
+  base-url: https://localhost:8089/api/logs/action-logs
+
+session-history:
+  base-url: http://localhost:9907/api/aaa/admin-console/connection-history/summary/filter
+
+product-details:
+  base-url: http://aeb53274042be477aba79f9076056316-ee9e05124271e8a5.elb.ap-southeast-2.amazonaws.com/airtel-aaa-product-catalog-management/api/plans/filter
+
+subscriber-details:
+  base-url: https://localhost:8089/api/user
+
+audit-log:
+  base-url: https://localhost:8089/api/user
+
+csv:
+  output:
+    directory:  /reports/output
+
+report:
+  default:
+    offset: 0
+    limit: 5
+  batch:
+    size: 200
+  output:
+     directory: /reports/output
+  watchdog:
+    stale-threshold-minutes: 20
+    check-interval-ms: 1200000   # 20 * 60 * 1000
+
+redis:
+  client-type: sentinel
+  hosts: redis://redis-cluster.cluster-redis.svc.cluster.local:26379
+  master-name: "${REDIS_MASTER_NAME}"
+  role: "${REDIS_ROLE}"
+  password: "${REDIS_PASSWORD}"
+  max-pool-size: 300
+  max-waiting-handlers: 5000
+  max-pool-waiting: 800
+  pool-recycle-timeout: 240000
+  reconnect-attempts: 3
+  reconnect-interval: 500
+  pool-cleaner-interval: 20000
+  timeout: 60000
+
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: "*"
+      path-mapping:
+        prometheus: prometheus
+  endpoint:
+    prometheus:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+#
