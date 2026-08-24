@@ -292,6 +292,18 @@
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
+        <!-- Elasticsearch — kept on the same 8.14.1 line as cdr-service, which writes the
+             radius-sessions indices this service aggregates usage from. -->
+        <dependency>
+            <groupId>co.elastic.clients</groupId>
+            <artifactId>elasticsearch-java</artifactId>
+            <version>8.14.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>elasticsearch-rest-client</artifactId>
+            <version>8.14.1</version>
+        </dependency>
     </dependencies>
     <repositories>
         <repository>

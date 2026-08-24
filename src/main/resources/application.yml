@@ -183,6 +183,45 @@ report:
   watchdog:
     stale-threshold-minutes: 20
     check-interval-ms: 1200000   # 20 * 60 * 1000
+  user-dump:
+    # Users per database page and per Elasticsearch aggregation request. This is what bounds
+    # heap: only one page of rows is live at a time, so the dump costs the same whether it is
+    # three thousand rows or three million. Well under Elasticsearch's default
+    # index.max_terms_count (65536), which caps the terms filter used for the page's users.
+    chunk-size: 5000
+    # Oracle row prefetch. Rows come back in blocks of this size instead of one round trip each.
+    jdbc-fetch-size: 2000
+    # Output buffer for the CSV stream; a megabyte turns millions of rows into a few thousand writes.
+    csv-buffer-bytes: 1048576
+    # One unambiguous timestamp format across every date column in the dump.
+    timestamp-format: "yyyy-MM-dd HH:mm:ss"
+    # What a bucket provisioned as unlimited reports in the QUOTA column.
+    unlimited-quota-label: Unlimited
+    # Zone D-1 is resolved in. Must match cdr-service's app.timezone, which decides the date
+    # suffix of the session index this report reads usage from.
+    timezone: "${TZ:UTC}"
+    elk:
+      # Base name of cdr-service's daily session indices (sessions-data in its configuration).
+      index-prefix: radius-sessions
+      # Composite aggregation page size; each page is one round trip.
+      composite-page-size: 5000
+
+# Elasticsearch cluster cdr-service writes the radius-sessions-* indices to, read here to total
+# each user's session usage for the dump.
+elasticsearch:
+  host: elasticsearch.efk.svc.cluster.local
+  port: 9200
+  protocol: http
+  username: "${ES_USER:}"
+  password: "${ES_PASSWORD:}"
+  pool:
+    max-conn-total: 50
+    max-conn-per-route: 50
+    io-thread-count: 2
+    connect-timeout-ms: 5000
+    # A composite aggregation page over a full day of sessions is far heavier than a document read.
+    socket-timeout-ms: 120000
+    connection-request-timeout-ms: 5000
 
 redis:
   client-type: sentinel
