@@ -29,6 +29,30 @@ public class AsyncConfig {
         return executor;
     }
 
+    /**
+     * Threads the user data dump splits its username shards over. It is kept apart from
+     * reportExecutor deliberately: that pool holds one slot per running report, and a dump that
+     * borrowed slots from it for its own shards would starve every other report while it ran.
+     */
+    @Bean(name = "userDumpExecutor")
+    public Executor userDumpExecutor(
+            @Value("${report.user-dump.shards:4}") int shards,
+            @Value("${report.user-dump.worker-threads:0}") int workerThreads) {
+
+        int threads = workerThreads > 0 ? workerThreads : Math.max(1, shards);
+
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(threads);
+        executor.setMaxPoolSize(threads);
+        // Shards are submitted in one burst per report and the submitting thread runs one of them
+        // itself, so the queue only has to hold the remainder of a few concurrent dumps.
+        executor.setQueueCapacity(threads * 4);
+        executor.setThreadNamePrefix("user-dump-shard-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
+
     @Bean(name = "reportExecutor")
     public Executor reportExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();

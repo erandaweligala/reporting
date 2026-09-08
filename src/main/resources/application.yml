@@ -184,6 +184,42 @@ report:
     stale-threshold-minutes: 20
     check-interval-ms: 1200000   # 20 * 60 * 1000
 
+  # USER_DATA_DUMP: the full subscriber base (~3M rows) for the previous day, as CSV.
+  user-dump:
+    days-back: 1                 # 1 = D-1
+    timezone: "${TZ:UTC}"        # must match the zone the CDR daily indices are named in
+    shards: 4                    # username ranges scanned in parallel; 1 disables sharding
+    worker-threads: 0            # 0 = one thread per shard
+    jdbc-fetch-size: 5000        # rows Oracle ships per round trip
+    query-timeout-seconds: 7200
+    csv-buffer-bytes: 1048576    # 1 MB in front of the output file
+    date-format: "DD/MM/YYYY HH24:MI:SS"   # Oracle format model for every timestamp column
+    bandwidth-bucket-type: BANDWIDTH       # BUCKET_INSTANCE.BUCKET_TYPE holding PLAN_BANDWIDTH
+    quota-bucket-type: DATA                # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA
+    unlimited-quota-label: Unlimited
+    usage:
+      enabled: true
+      index: radius-sessions     # cdr-service `sessions-data`; the D-1 index is derived from it
+      page-size: 2000            # usernames per composite aggregation page
+      buckets-per-user: 20
+      nested: true               # sessionInstances is mapped as a nested type
+      instances-path: sessionInstances
+
+# Elasticsearch cluster holding the CDR session documents, read by the user data dump.
+elasticsearch:
+  host: elasticsearch.efk.svc.cluster.local
+  port: 9200
+  protocol: http
+  username: "${ES_USER:}"
+  password: "${ES_PASSWORD:}"
+  pool:
+    max-conn-total: 20
+    max-conn-per-route: 20
+    io-thread-count: 2
+    connect-timeout-ms: 5000
+    socket-timeout-ms: 120000
+    connection-request-timeout-ms: 5000
+
 redis:
   client-type: sentinel
   hosts: redis://redis-cluster.cluster-redis.svc.cluster.local:26379

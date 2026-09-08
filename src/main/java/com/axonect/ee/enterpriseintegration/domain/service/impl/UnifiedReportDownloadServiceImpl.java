@@ -7,6 +7,7 @@ import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
 import com.axonect.ee.enterpriseintegration.domain.repository.DownloadReportRepository;
 import com.axonect.ee.enterpriseintegration.domain.service.ReportDefinition;
 import com.axonect.ee.enterpriseintegration.domain.service.ReportWriter;
+import com.axonect.ee.enterpriseintegration.domain.service.StreamingReportDefinition;
 import com.axonect.ee.enterpriseintegration.domain.service.UnifiedReportDownloadService;
 import com.axonect.ee.enterpriseintegration.domain.util.ReportDefinitionsRegistry;
 import com.axonect.ee.enterpriseintegration.domain.util.ReportFormat;
@@ -20,6 +21,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Date;
 import java.util.List;
@@ -135,7 +137,9 @@ public class UnifiedReportDownloadServiceImpl implements UnifiedReportDownloadSe
 
             DownloadReport report = reportOptional.get();
             ReportDefinition reportDefinition = ReportDefinitionsRegistry.getDefinition(report.getReportType());
-            String filePath = processStandardReport(report, reportDefinition);
+            String filePath = reportDefinition instanceof StreamingReportDefinition streamingDefinition
+                    ? processStreamingReport(report, streamingDefinition)
+                    : processStandardReport(report, reportDefinition);
 
             if (filePath == null) {
                 throw new IllegalStateException("No data found for report ID: " + reportId);
@@ -190,6 +194,47 @@ public class UnifiedReportDownloadServiceImpl implements UnifiedReportDownloadSe
         } catch (Exception ex) {
             log.error("Failed to update report status after error for report ID: {}", reportId, ex);
         }
+    }
+
+    /**
+     * Runs a report that writes itself.
+     *
+     * <p>The paged loop below cannot serve an extract of a few million rows: it asks for rows at
+     * an ever-growing offset and materialises each page before any of it reaches the file. A
+     * streaming definition instead keeps one cursor open and appends rows as they arrive, so this
+     * method only sets up the file, hands it over and records the outcome.
+     */
+    private String processStreamingReport(DownloadReport report, StreamingReportDefinition definition)
+            throws Exception {
+
+        ReportFormat format = ReportFormat.valueOf(report.getFormat());
+        if (format != ReportFormat.CSV) {
+            throw new IllegalArgumentException(definition.reportType()
+                    + " is produced as CSV only; a spreadsheet cannot hold a report of this size. "
+                    + "Requested format: " + format);
+        }
+
+        ReportWriter writer = reportWriterFactory.get(format);
+        Path outputPath = writer.init(
+                report.getId() + "_" + definition.reportType(),
+                definition.columns(),
+                report.getClassificationLevel() != null ? report.getClassificationLevel() : "Open");
+
+        long startTime = System.currentTimeMillis();
+        long rows = definition.streamTo(report, outputPath);
+
+        if (rows == 0) {
+            log.warn("No records found for report ID: {}", report.getId());
+            Files.deleteIfExists(outputPath);
+            updateReportStatus(report, "No Records", null);
+            return null;
+        }
+
+        log.info("Completed streaming report. Report ID: {} | Type: {} | Rows: {} | Took: {} ms",
+                report.getId(), definition.reportType(), rows, System.currentTimeMillis() - startTime);
+
+        updateReportStatus(report, "Completed", outputPath.toString());
+        return outputPath.toString();
     }
 
     private String processStandardReport(DownloadReport report, ReportDefinition reportDefinition) throws IOException {
