@@ -94,7 +94,7 @@ class UserDataDumpReportDefinitionTest {
 
     @Test
     void writesEachDatabaseColumnIntoItsAgreedPositionAndFillsUsageFromElasticsearch() throws Exception {
-        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "Unlimited", "DATA_1");
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "107374182400", "DATA_1");
         stubReader(List.<String[]>of(dbRow));
         stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 70093948746L)));
 
@@ -112,10 +112,27 @@ class UserDataDumpReportDefinitionTest {
         assertEquals("col20", written[19], "MAC_ADDRESS");
         assertEquals("col22", written[21], "ORIGINAL_MAC_ADDRESS");
         assertEquals("FTTH_50Mbps", written[35], "PLAN_BANDWIDTH");
-        assertEquals("Unlimited", written[36], "QUOTA");
+        assertEquals("107374182400", written[36], "QUOTA");
         // ...then usage is spliced in, and the last database column follows it.
         assertEquals("70093948746", written[37], "UTLIZED_QUOTA");
         assertEquals("bundle-end", written[38], "BUNDLE_DEACTIVATION_DATE");
+    }
+
+    @Test
+    void anUnlimitedBundleReportsAnEmptyQuotaRatherThanALabel() throws Exception {
+        // UserDumpSql leaves QUOTA null for an unlimited data bucket; it must reach the CSV as an
+        // empty column, without disturbing the ones around it.
+        stubReader(List.<String[]>of(databaseRow("unlimiteduser", "FTTH_50Mbps", null, "DATA_1")));
+        stubUsage(Map.of("unlimiteduser", Map.of("DATA_1", 70093948746L)));
+
+        Path output = outputWithHeader("unlimited.csv");
+        definition.streamTo(report(), output);
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals(39, written.length);
+        assertEquals("FTTH_50Mbps", written[35], "PLAN_BANDWIDTH");
+        assertEquals("", written[36], "QUOTA");
+        assertEquals("70093948746", written[37], "UTLIZED_QUOTA");
     }
 
     @Test

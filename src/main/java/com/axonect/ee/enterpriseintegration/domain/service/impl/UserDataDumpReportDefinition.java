@@ -221,7 +221,6 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
                 Timestamp.valueOf(day.plusDays(1).atStartOfDay()),
                 properties.getBandwidthBucketType(),
                 properties.getQuotaBucketType(),
-                properties.getUnlimitedQuotaLabel(),
                 properties.getDateFormat());
 
         long start = System.currentTimeMillis();
