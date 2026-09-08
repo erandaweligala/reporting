@@ -16,9 +16,10 @@ class UserDumpSqlTest {
     private static final Timestamp DAY_START = Timestamp.valueOf(LocalDate.of(2026, 8, 22).atStartOfDay());
     private static final Timestamp DAY_END = Timestamp.valueOf(LocalDate.of(2026, 8, 23).atStartOfDay());
 
+    private static final String DATE_FORMAT = "YYYY-MM-DD HH24:MI:SS.FF3";
+
     private UserDumpSql.Statement build(String from, String to) {
-        return UserDumpSql.build(from, to, DAY_START, DAY_END,
-                "BANDWIDTH", "DATA", "Unlimited", "DD/MM/YYYY HH24:MI:SS");
+        return UserDumpSql.build(from, to, DAY_START, DAY_END, "BANDWIDTH", "DATA", DATE_FORMAT);
     }
 
     @Test
@@ -28,9 +29,9 @@ class UserDumpSqlTest {
         assertEquals(countPlaceholders(statement.sql()), statement.params().size(),
                 "every ? must have a value bound to it");
 
-        // svc window, svc range, the four bucket pivots, then the mac and outer ranges.
+        // svc window, svc range, the three bucket pivots, then the mac and outer ranges.
         assertEquals(List.of(DAY_END, DAY_START, "a", "m",
-                        "BANDWIDTH", "DATA", "Unlimited", "DATA",
+                        "BANDWIDTH", "DATA", "DATA",
                         "a", "m", "a", "m"),
                 statement.params());
     }
@@ -40,7 +41,7 @@ class UserDumpSqlTest {
         UserDumpSql.Statement statement = build(null, null);
 
         assertEquals(countPlaceholders(statement.sql()), statement.params().size());
-        assertEquals(List.of(DAY_END, DAY_START, "BANDWIDTH", "DATA", "Unlimited", "DATA"),
+        assertEquals(List.of(DAY_END, DAY_START, "BANDWIDTH", "DATA", "DATA"),
                 statement.params());
         assertFalse(statement.sql().contains("USER_NAME >="),
                 "an unbounded dump should not carry a range predicate at all");
@@ -48,9 +49,9 @@ class UserDumpSqlTest {
 
     @Test
     void openEndedShardBindsOnlyTheBoundItHas() {
-        assertEquals(List.of(DAY_END, DAY_START, "t", "BANDWIDTH", "DATA", "Unlimited", "DATA", "t", "t"),
+        assertEquals(List.of(DAY_END, DAY_START, "t", "BANDWIDTH", "DATA", "DATA", "t", "t"),
                 build("t", null).params());
-        assertEquals(List.of(DAY_END, DAY_START, "g", "BANDWIDTH", "DATA", "Unlimited", "DATA", "g", "g"),
+        assertEquals(List.of(DAY_END, DAY_START, "g", "BANDWIDTH", "DATA", "DATA", "g", "g"),
                 build(null, "g").params());
     }
 
@@ -93,19 +94,44 @@ class UserDumpSqlTest {
 
     @Test
     void appliesTheConfiguredDateFormatToEveryTimestamp() {
-        String sql = UserDumpSql.build(null, null, DAY_START, DAY_END,
-                "BANDWIDTH", "DATA", "Unlimited", "YYYY-MM-DD HH24:MI:SS").sql();
+        String sql = build(null, null).sql();
 
-        assertEquals(5, countOccurrences(sql, "'YYYY-MM-DD HH24:MI:SS'"),
+        assertEquals(5, countOccurrences(sql, "'" + DATE_FORMAT + "'"),
                 "created, updated, customer activation, bundle activation and deactivation dates");
+    }
+
+    @Test
+    void castsEveryTimestampSoAFractionalSecondsModelIsLegalOnDateColumns() {
+        String sql = build(null, null).sql();
+
+        // TO_CHAR of a DATE with an FF element raises ORA-01821, and the dump's format carries
+        // milliseconds, so every timestamp has to reach TO_CHAR as a TIMESTAMP.
+        assertEquals(5, countOccurrences(sql, "AS TIMESTAMP)"));
+        for (String column : List.of("u.CREATED_DATE", "u.UPDATED_DATE", "u.CUSTOMER_ACTIVATION_DATE",
+                "svc.SERVICE_START_DATE", "svc.EXPIRY_DATE")) {
+            assertTrue(sql.contains("TO_CHAR(CAST(" + column + " AS TIMESTAMP), '" + DATE_FORMAT + "')"),
+                    column + " must be rendered under the configured format model");
+        }
+    }
+
+    @Test
+    void anUnlimitedQuotaBucketLeavesTheQuotaColumnEmpty() {
+        String sql = build(null, null).sql();
+
+        // The consuming system reads an empty QUOTA as "no cap", so an unlimited bucket must not
+        // reach the pivot at all rather than being labelled.
+        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? AND NVL(b.IS_UNLIMITED, 0) <> 1"),
+                "unlimited buckets must be excluded from the QUOTA pivot");
+        assertFalse(sql.contains("IS_UNLIMITED = 1 THEN ?"),
+                "no label may be bound in for an unlimited quota");
     }
 
     @Test
     void rejectsADateFormatThatCouldCarrySql() {
         assertThrows(IllegalArgumentException.class, () -> UserDumpSql.build(null, null, DAY_START, DAY_END,
-                "BANDWIDTH", "DATA", "Unlimited", "YYYY') || (SELECT PASSWORD FROM AAA_USER) || ('"));
+                "BANDWIDTH", "DATA", "YYYY') || (SELECT PASSWORD FROM AAA_USER) || ('"));
         assertThrows(IllegalArgumentException.class, () -> UserDumpSql.build(null, null, DAY_START, DAY_END,
-                "BANDWIDTH", "DATA", "Unlimited", "  "));
+                "BANDWIDTH", "DATA", "  "));
     }
 
     private static int countPlaceholders(String sql) {

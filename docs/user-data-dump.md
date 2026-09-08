@@ -17,6 +17,14 @@ make it survive that row count, and the settings an operator needs.
 Column order is part of the contract with the consuming system and is asserted in
 `UserDataDumpReportDefinitionTest`. `UTLIZED_QUOTA` is spelled the way the consumer spells it.
 
+Two more parts of that contract are fixed by the sample extract rather than by our own taste. Every
+timestamp is written as `yyyy-MM-dd HH:mm:ss.SSS` — the `date-format` below is the Oracle model that
+produces it, and because it carries fractional seconds each column is CAST to `TIMESTAMP` before
+`TO_CHAR` sees it (`TO_CHAR` of a `DATE` with an `FF` element raises ORA-01821, and the dump does not
+depend on which of the two each column happens to be). And `QUOTA` is left **empty** for a bundle
+whose data bucket is unlimited: the consumer reads a blank there as "no cap", so `UserDumpSql`
+excludes unlimited buckets from the pivot rather than writing a label into the column.
+
 ## How a run is shaped
 
 ```
@@ -96,10 +104,9 @@ report:
     jdbc-fetch-size: 5000
     query-timeout-seconds: 7200
     csv-buffer-bytes: 1048576
-    date-format: "DD/MM/YYYY HH24:MI:SS"
+    date-format: "YYYY-MM-DD HH24:MI:SS.FF3"
     bandwidth-bucket-type: BANDWIDTH
     quota-bucket-type: DATA
-    unlimited-quota-label: Unlimited
     usage:
       enabled: true
       index: radius-sessions     # cdr-service `sessions-data`
@@ -129,7 +136,12 @@ starting point, not a maximum.
   the per-MAC table can produce.
 - `BUCKET_INSTANCE.BUCKET_TYPE` distinguishes the bandwidth bucket from the data bucket, and
   `BUCKET_ID` carries the bandwidth name (`FTTH_50Mbps` in the sample). Both type values are
-  configurable above.
+  configurable above. `IS_UNLIMITED = 1` marks a bucket with no cap, and such a bucket is reported
+  as an empty `QUOTA`.
+- `CYCLE_DATE` is not a timestamp. It is the one date-named column the dump does not run through
+  `TO_CHAR`, so if it turns out to be an Oracle `DATE` it will come back in the session's NLS
+  format rather than the dump's — it is blank in the sample extract, so the schema is the only
+  place to settle it.
 - `BUNDLE_ACTIVATION_DATE` is `SERVICE_INSTANCE.SERVICE_START_DATE` and `BUNDLE_DEACTIVATION_DATE`
   is `EXPIRY_DATE`; where a user has held several bundles, the one active on D-1 is reported, most
   recent first.

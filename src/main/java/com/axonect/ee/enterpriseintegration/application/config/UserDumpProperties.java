@@ -46,17 +46,17 @@ public class UserDumpProperties {
     /** Threads available to shard workers. Defaults to one per shard when left at 0. */
     private int workerThreads = 0;
 
-    /** Oracle format model applied to every timestamp column of the dump. */
-    private String dateFormat = "DD/MM/YYYY HH24:MI:SS";
+    /**
+     * Oracle format model applied to every timestamp column of the dump. Milliseconds are part of
+     * the format the consuming system reads, so the model carries FF3.
+     */
+    private String dateFormat = "YYYY-MM-DD HH24:MI:SS.FF3";
 
     /** BUCKET_INSTANCE.BUCKET_TYPE that carries the plan bandwidth. */
     private String bandwidthBucketType = "BANDWIDTH";
 
     /** BUCKET_INSTANCE.BUCKET_TYPE that carries the data quota. */
     private String quotaBucketType = "DATA";
-
-    /** Written to QUOTA when the quota bucket is flagged unlimited. */
-    private String unlimitedQuotaLabel = "Unlimited";
 
     /** Usage lookup against Elasticsearch. */
     private Usage usage = new Usage();

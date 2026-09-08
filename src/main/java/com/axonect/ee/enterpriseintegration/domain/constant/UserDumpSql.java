@@ -55,7 +55,6 @@ public final class UserDumpSql {
      * @param dayEnd          start of the following day (exclusive)
      * @param bandwidthBucket BUCKET_INSTANCE.BUCKET_TYPE holding the plan bandwidth
      * @param quotaBucket     BUCKET_INSTANCE.BUCKET_TYPE holding the data quota
-     * @param unlimitedLabel  text written to QUOTA when the quota bucket is unlimited
      * @param dateFormat      Oracle format model applied to every timestamp column
      */
     public static Statement build(String usernameFrom,
@@ -64,7 +63,6 @@ public final class UserDumpSql {
                                   java.sql.Timestamp dayEnd,
                                   String bandwidthBucket,
                                   String quotaBucket,
-                                  String unlimitedLabel,
                                   String dateFormat) {
 
         String fmt = validateDateFormat(dateFormat);
@@ -87,9 +85,10 @@ public final class UserDumpSql {
            .append("), bkt AS (")
            .append(" SELECT b.SERVICE_ID,")
            .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS PLAN_BANDWIDTH,")
-           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ?")
-           .append("                 THEN CASE WHEN b.IS_UNLIMITED = 1 THEN ?")
-           .append("                           ELSE TO_CHAR(b.INITIAL_BALANCE) END END) AS QUOTA,")
+           // An unlimited bucket has no balance to report, and the consumer reads an empty QUOTA
+           // as "no cap" — so it is filtered out here rather than labelled.
+           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? AND NVL(b.IS_UNLIMITED, 0) <> 1")
+           .append("                 THEN TO_CHAR(b.INITIAL_BALANCE) END) AS QUOTA,")
            .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS QUOTA_BUCKET_ID")
            .append(" FROM BUCKET_INSTANCE b JOIN svc ON svc.ID = b.SERVICE_ID")
            .append(" GROUP BY b.SERVICE_ID")
@@ -102,23 +101,22 @@ public final class UserDumpSql {
            .append(" FROM AAA_USER_MAC_ADDRESS m");
         params.add(bandwidthBucket);
         params.add(quotaBucket);
-        params.add(unlimitedLabel);
         params.add(quotaBucket);
         appendWhereRange(sql, params, "m.USER_NAME", usernameFrom, usernameTo);
         sql.append(" GROUP BY m.USER_NAME)")
            .append(" SELECT u.USER_NAME, u.GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
            .append("        u.CONCURRENCY, u.CONTACT_EMAIL, u.CONTACT_NAME, u.CONTACT_NUMBER,")
-           .append("        TO_CHAR(u.CREATED_DATE, '").append(fmt).append("'),")
+           .append("        ").append(asText("u.CREATED_DATE", fmt)).append(",")
            .append("        u.CUSTOM_TIMEOUT, u.CYCLE_DATE, u.ENCRYPTION_METHOD, u.GROUP_ID, u.IDLE_TIMEOUT,")
            .append("        u.IP_ALLOCATION, u.IP_POOL_NAME, u.IPV4, u.IPV6, mac.MAC_ADDRESSES,")
            .append("        u.NAS_PORT_TYPE, mac.ORIGINAL_MAC_ADDRESSES, u.REMOTE_ID, u.REQUEST_ID,")
            .append("        u.SESSION_TIMEOUT, u.STATUS, u.SUBSCRIPTION,")
-           .append("        TO_CHAR(u.UPDATED_DATE, '").append(fmt).append("'),")
+           .append("        ").append(asText("u.UPDATED_DATE", fmt)).append(",")
            .append("        u.SLMN, u.VLAN_ID, u.NAS_IP_ADDRESS, u.NOTIFICATION_TEMPLATES,")
-           .append("        TO_CHAR(u.CUSTOMER_ACTIVATION_DATE, '").append(fmt).append("'),")
-           .append("        TO_CHAR(svc.SERVICE_START_DATE, '").append(fmt).append("'),")
+           .append("        ").append(asText("u.CUSTOMER_ACTIVATION_DATE", fmt)).append(",")
+           .append("        ").append(asText("svc.SERVICE_START_DATE", fmt)).append(",")
            .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")
-           .append("        TO_CHAR(svc.EXPIRY_DATE, '").append(fmt).append("'),")
+           .append("        ").append(asText("svc.EXPIRY_DATE", fmt)).append(",")
            .append("        bkt.QUOTA_BUCKET_ID")
            .append(" FROM AAA_USER u")
            .append(" LEFT JOIN svc ON svc.USERNAME = u.USER_NAME")
@@ -130,6 +128,18 @@ public final class UserDumpSql {
         sql.append(" ORDER BY u.USER_NAME");
 
         return new Statement(sql.toString(), params);
+    }
+
+    /**
+     * Renders one timestamp column as text under the configured format model.
+     *
+     * <p>The value is CAST to TIMESTAMP first: the dump's format model carries fractional seconds,
+     * and TO_CHAR of a DATE with an FF element raises ORA-01821. The cast is free on a column that
+     * is already a TIMESTAMP and makes the statement independent of which of the two each column
+     * happens to be.
+     */
+    private static String asText(String column, String format) {
+        return "TO_CHAR(CAST(" + column + " AS TIMESTAMP), '" + format + "')";
     }
 
     private static void appendWhereRange(StringBuilder sql, List<Object> params, String column,
