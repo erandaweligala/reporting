@@ -92,6 +92,35 @@ dump never touches the index cdr-service is currently writing into.
 loop. It is produced as CSV only; requesting `EXCEL` fails fast rather than attempting a
 spreadsheet of this size.
 
+A run is two calls. The first asks for the dump and returns immediately — the dump itself is
+generated on the report executor, and at three million rows that takes minutes, not the life of an
+HTTP request:
+
+```
+POST /api/report-download/create
+userId: <operator>
+{ "reportType": "USER_DATA_DUMP", "classificationLevel": "Confidential" }
+```
+
+`format` may be given as `CSV`, but it does not need to be: a request that leaves it out is written
+as CSV for `USER_DATA_DUMP`, because a streaming report is CSV-only and defaulting it to the
+spreadsheet every other report gets would fail the run instead. Naming `EXCEL` here still fails, by
+design.
+
+The second call retrieves the finished file. `id` is the `REPORT_DOWNLOAD` row's id — the create
+call does not return it, so it is read back from `POST /api/report-management/filter`, which is
+also where the run's status (`Pending` → `Processing` → `Completed`, or `Failed`/`No Records`)
+is visible:
+
+```
+GET /api/report-download/download?id={id}
+```
+
+The response is the dump itself, as `text/csv`, named
+`{id}_USER_DATA_DUMP_yyyy_MM_dd_HH_mm_ss.csv` — the file `report.output.directory` holds. Asking
+for it before the run finishes answers `4005 Report file not found` along with the status the
+report is currently in, so a poll on that endpoint is a legitimate way to wait for the dump.
+
 ## Settings
 
 ```yaml

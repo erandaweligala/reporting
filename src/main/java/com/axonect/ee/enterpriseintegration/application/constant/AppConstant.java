@@ -10,6 +10,7 @@ public class AppConstant {
 
     public static final String NOT_STARTED = "NOT_STARTED";
     public static final String EXCEL = "EXCEL";
+    public static final String CSV = "CSV";
     public static final String CREATE = "CREATE";
     public static final String UPDATE = "UPDATE";
     public static final String DELETE = "DELETE";
