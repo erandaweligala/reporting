@@ -37,22 +37,6 @@ import java.util.concurrent.Executor;
  *
  * <p>Shape of the run, and why:
  *
- * <ul>
- *   <li><b>One query, not four.</b> The MAC addresses, the active bundle and its buckets are
- *       folded into the dump query as pre-aggregated inline views. Fetching them per user would be
- *       three round trips per row — around nine million on a three million row dump.</li>
- *   <li><b>One cursor, not pages.</b> Rows are streamed off an open JDBC cursor, so the query is
- *       planned once and walked once; offset pagination over a set this size re-reads and discards
- *       everything before each page.</li>
- *   <li><b>Usage merge-joined, not looked up.</b> Both sides — the cursor and the Elasticsearch
- *       aggregation — are read in username order and consumed in step. Nothing is held except the
- *       row being written and the aggregation page being drained, so heap use is flat whether the
- *       dump has three thousand rows or three million.</li>
- *   <li><b>Shards, not threads over rows.</b> The username keyspace is cut into contiguous ranges
- *       that both Oracle and Elasticsearch can filter on, so a shard is a genuinely independent
- *       scan on both sides. Each writes its own part; the parts are concatenated at the end at
- *       file-system speed.</li>
- * </ul>
  */
 @Component
 @Slf4j

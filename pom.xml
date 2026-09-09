@@ -300,11 +300,11 @@
             <artifactId>spring-kafka</artifactId>
             <version>3.2.0</version>  <!-- use compatible version -->
         </dependency>
-        <dependency>
-            <groupId>com.adl.et.telco.dte.prom_spring_metrics_plugin</groupId>
-            <artifactId>prom-spring-metrics-plugin</artifactId>
-            <version>1.0.4</version>
-        </dependency>
+<!--        <dependency>-->
+<!--            <groupId>com.adl.et.telco.dte.prom_spring_metrics_plugin</groupId>-->
+<!--            <artifactId>prom-spring-metrics-plugin</artifactId>-->
+<!--            <version>1.0.4</version>-->
+<!--        </dependency>-->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>

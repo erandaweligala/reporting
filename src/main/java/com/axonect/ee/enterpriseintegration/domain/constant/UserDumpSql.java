@@ -109,7 +109,7 @@ public final class UserDumpSql {
            .append("        u.SESSION_TIMEOUT, u.STATUS, u.SUBSCRIPTION,")
            .append("        ").append(asText("u.UPDATED_DATE", fmt)).append(",")
            .append("        u.SLMN, u.VLAN_ID, u.NAS_IP_ADDRESS, u.NOTIFICATION_TEMPLATES,")
-           .append("        ").append(asText("u.CUSTOMER_ACTIVATION_DATE", fmt)).append(",")
+           .append("        ").append(asText("u.CREATED_DATE", fmt)).append(",")
            .append("        ").append(asText("svc.SERVICE_START_DATE", fmt)).append(",")
            .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")
            .append("        ").append(asText("svc.EXPIRY_DATE", fmt)).append(",")
