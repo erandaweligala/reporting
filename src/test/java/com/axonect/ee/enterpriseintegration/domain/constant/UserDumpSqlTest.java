@@ -107,7 +107,9 @@ class UserDumpSqlTest {
         // TO_CHAR of a DATE with an FF element raises ORA-01821, and the dump's format carries
         // milliseconds, so every timestamp has to reach TO_CHAR as a TIMESTAMP.
         assertEquals(5, countOccurrences(sql, "AS TIMESTAMP)"));
-        for (String column : List.of("u.CREATED_DATE", "u.UPDATED_DATE", "u.CUSTOMER_ACTIVATION_DATE",
+        // CUSTOMER_ACTIVATION_DATE is reported from AAA_USER.CREATE_DATE — the CSV name is not a
+        // column name.
+        for (String column : List.of("u.CREATED_DATE", "u.UPDATED_DATE", "u.CREATE_DATE",
                 "svc.SERVICE_START_DATE", "svc.EXPIRY_DATE")) {
             assertTrue(sql.contains("TO_CHAR(CAST(" + column + " AS TIMESTAMP), '" + DATE_FORMAT + "')"),
                     column + " must be rendered under the configured format model");

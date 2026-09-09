@@ -9,6 +9,7 @@ make it survive that row count, and the settings an operator needs.
 | Columns | Source |
 | --- | --- |
 | `USER_ID`, and every column not listed below | `AAA_USER` |
+| `CUSTOMER_ACTIVATION_DATE` | `AAA_USER.CREATE_DATE` — the CSV name is not a column name |
 | `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, comma-joined per user with `LISTAGG` |
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
 | `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
@@ -171,6 +172,10 @@ starting point, not a maximum.
   `TO_CHAR`, so if it turns out to be an Oracle `DATE` it will come back in the session's NLS
   format rather than the dump's — it is blank in the sample extract, so the schema is the only
   place to settle it.
+- `CUSTOMER_ACTIVATION_DATE` is the consumer's name for the column, not the schema's: `AAA_USER`
+  has no `CUSTOMER_ACTIVATION_DATE` (selecting it raised `ORA-00904: "U"."CUSTOMER_ACTIVATION_DATE":
+  invalid identifier`), and the subscriber's activation timestamp is `CREATE_DATE`. That is separate
+  from `CREATED_DATE`, which the dump reports under its own name.
 - `BUNDLE_ACTIVATION_DATE` is `SERVICE_INSTANCE.SERVICE_START_DATE` and `BUNDLE_DEACTIVATION_DATE`
   is `EXPIRY_DATE`; where a user has held several bundles, the one active on D-1 is reported, most
   recent first.
