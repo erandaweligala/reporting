@@ -4,9 +4,10 @@ import com.axonect.ee.enterpriseintegration.application.config.UserDumpPropertie
 import com.axonect.ee.enterpriseintegration.application.transport.response.CsvColumn;
 import com.axonect.ee.enterpriseintegration.domain.client.UsageAggregationClient;
 import com.axonect.ee.enterpriseintegration.domain.client.UserUsageCursor;
+import com.axonect.ee.enterpriseintegration.domain.constant.SqlStatement;
 import com.axonect.ee.enterpriseintegration.domain.constant.UserDumpSql;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
-import com.axonect.ee.enterpriseintegration.domain.repository.UserDumpRowReader;
+import com.axonect.ee.enterpriseintegration.domain.repository.StreamingRowReader;
 import com.axonect.ee.enterpriseintegration.domain.service.StreamingReportDefinition;
 import com.axonect.ee.enterpriseintegration.domain.util.StreamingCsvWriter;
 import com.axonect.ee.enterpriseintegration.domain.util.UserDumpShardPlanner;
@@ -110,12 +111,12 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     /** Result set columns 1..37 land on CSV columns 1..37 unchanged. */
     private static final int LAST_DIRECT_COLUMN = 37;
 
-    private final UserDumpRowReader rowReader;
+    private final StreamingRowReader rowReader;
     private final UsageAggregationClient usageAggregationClient;
     private final UserDumpProperties properties;
     private final Executor shardExecutor;
 
-    public UserDataDumpReportDefinition(UserDumpRowReader rowReader,
+    public UserDataDumpReportDefinition(StreamingRowReader rowReader,
                                         UsageAggregationClient usageAggregationClient,
                                         UserDumpProperties properties,
                                         @Qualifier("userDumpExecutor") Executor shardExecutor) {
@@ -214,7 +215,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
      * advanced in step, which is the whole point of the ordering both sides agree on.
      */
     private long runShard(UsernameRange range, LocalDate day, Path target) throws Exception {
-        UserDumpSql.Statement statement = UserDumpSql.build(
+        SqlStatement statement = UserDumpSql.build(
                 range.fromInclusive(),
                 range.toExclusive(),
                 Timestamp.valueOf(day.atStartOfDay()),
@@ -231,7 +232,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         try (UserUsageCursor usage = usageAggregationClient.open(day, range.fromInclusive(), range.toExclusive());
              StreamingCsvWriter writer = new StreamingCsvWriter(target, properties.getCsvBufferBytes())) {
 
-            long rows = rowReader.stream(
+            long rows = rowReader.streamInBinaryOrder(
                     statement,
                     properties.getJdbcFetchSize(),
                     properties.getQueryTimeoutSeconds(),

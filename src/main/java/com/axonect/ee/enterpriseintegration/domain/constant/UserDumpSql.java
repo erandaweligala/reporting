@@ -42,10 +42,6 @@ public final class UserDumpSql {
     private UserDumpSql() {
     }
 
-    /** A statement together with the positional parameters it expects. */
-    public record Statement(String sql, List<Object> params) {
-    }
-
     /**
      * Builds the dump statement for one shard.
      *
@@ -57,15 +53,15 @@ public final class UserDumpSql {
      * @param quotaBucket     BUCKET_INSTANCE.BUCKET_TYPE holding the data quota
      * @param dateFormat      Oracle format model applied to every timestamp column
      */
-    public static Statement build(String usernameFrom,
-                                  String usernameTo,
-                                  java.sql.Timestamp dayStart,
-                                  java.sql.Timestamp dayEnd,
-                                  String bandwidthBucket,
-                                  String quotaBucket,
-                                  String dateFormat) {
+    public static SqlStatement build(String usernameFrom,
+                                     String usernameTo,
+                                     java.sql.Timestamp dayStart,
+                                     java.sql.Timestamp dayEnd,
+                                     String bandwidthBucket,
+                                     String quotaBucket,
+                                     String dateFormat) {
 
-        String fmt = validateDateFormat(dateFormat);
+        String fmt = OracleText.validateFormat(dateFormat);
         List<Object> params = new ArrayList<>();
         StringBuilder sql = new StringBuilder(4096);
 
@@ -127,19 +123,12 @@ public final class UserDumpSql {
         // usernames in, so the two streams can be merge-joined without buffering either side.
         sql.append(" ORDER BY u.USER_NAME");
 
-        return new Statement(sql.toString(), params);
+        return new SqlStatement(sql.toString(), params);
     }
 
-    /**
-     * Renders one timestamp column as text under the configured format model.
-     *
-     * <p>The value is CAST to TIMESTAMP first: the dump's format model carries fractional seconds,
-     * and TO_CHAR of a DATE with an FF element raises ORA-01821. The cast is free on a column that
-     * is already a TIMESTAMP and makes the statement independent of which of the two each column
-     * happens to be.
-     */
+    /** Renders one timestamp column as text under the configured format model. */
     private static String asText(String column, String format) {
-        return "TO_CHAR(CAST(" + column + " AS TIMESTAMP), '" + format + "')";
+        return OracleText.timestampAsText(column, format);
     }
 
     private static void appendWhereRange(StringBuilder sql, List<Object> params, String column,
@@ -163,18 +152,4 @@ public final class UserDumpSql {
         }
     }
 
-    /**
-     * The date format is concatenated into the statement (Oracle will not fold a bind variable
-     * into a format model without re-parsing it per row), so it is restricted to the characters a
-     * format model can legitimately contain.
-     */
-    private static String validateDateFormat(String dateFormat) {
-        if (dateFormat == null || dateFormat.isBlank()) {
-            throw new IllegalArgumentException("User dump date format must be configured");
-        }
-        if (!dateFormat.matches("[A-Za-z0-9 :/.,\\-]+")) {
-            throw new IllegalArgumentException("Unsupported Oracle date format model: " + dateFormat);
-        }
-        return dateFormat;
-    }
 }

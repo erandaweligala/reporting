@@ -6,7 +6,7 @@ import com.axonect.ee.enterpriseintegration.domain.client.UsageAggregationClient
 import com.axonect.ee.enterpriseintegration.domain.client.UserUsageCursor;
 import com.axonect.ee.enterpriseintegration.domain.constant.UserDumpSql;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
-import com.axonect.ee.enterpriseintegration.domain.repository.UserDumpRowReader;
+import com.axonect.ee.enterpriseintegration.domain.repository.StreamingRowReader;
 import com.axonect.ee.enterpriseintegration.domain.util.UserDumpShardPlanner;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,14 +54,14 @@ class UserDataDumpReportDefinitionTest {
     @TempDir
     Path tempDir;
 
-    private UserDumpRowReader rowReader;
+    private StreamingRowReader rowReader;
     private UsageAggregationClient usageAggregationClient;
     private UserDumpProperties properties;
     private UserDataDumpReportDefinition definition;
 
     @BeforeEach
     void setUp() {
-        rowReader = mock(UserDumpRowReader.class);
+        rowReader = mock(StreamingRowReader.class);
         usageAggregationClient = mock(UsageAggregationClient.class);
         properties = new UserDumpProperties();
         properties.setShards(1);
@@ -167,8 +167,8 @@ class UserDataDumpReportDefinitionTest {
 
         // Each shard emits a single row naming the range it was given, so the finished file shows
         // whether the parts were stitched back together in keyspace order.
-        when(rowReader.stream(any(), anyInt(), anyInt(), any())).thenAnswer(invocation -> {
-            UserDumpRowReader.RowHandler handler = invocation.getArgument(3);
+        when(rowReader.streamInBinaryOrder(any(), anyInt(), anyInt(), any())).thenAnswer(invocation -> {
+            StreamingRowReader.RowHandler handler = invocation.getArgument(3);
             handler.handle(resultSetOf(databaseRow(shardInProgress.get(), "bw", "quota", "DATA_1")));
             return 1L;
         });
@@ -183,7 +183,7 @@ class UserDataDumpReportDefinitionTest {
         assertEquals(expectedShardNames(3),
                 lines.subList(1, 4).stream().map(line -> line.split(",", -1)[0]).toList());
 
-        verify(rowReader, times(3)).stream(any(), anyInt(), anyInt(), any());
+        verify(rowReader, times(3)).streamInBinaryOrder(any(), anyInt(), anyInt(), any());
         assertTrue(listPartFiles().isEmpty(), "part files must be cleaned up: " + listPartFiles());
     }
 
@@ -214,7 +214,7 @@ class UserDataDumpReportDefinitionTest {
     void aFailingShardLeavesNoPartFilesBehind() throws Exception {
         properties.setShards(3);
         stubUsage(Map.of());
-        when(rowReader.stream(any(), anyInt(), anyInt(), any()))
+        when(rowReader.streamInBinaryOrder(any(), anyInt(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("ORA-01555: snapshot too old"));
 
         Path output = outputWithHeader("failed.csv");
@@ -259,8 +259,8 @@ class UserDataDumpReportDefinitionTest {
     }
 
     private void stubReader(List<String[]> rows) throws Exception {
-        when(rowReader.stream(any(), anyInt(), anyInt(), any())).thenAnswer(invocation -> {
-            UserDumpRowReader.RowHandler handler = invocation.getArgument(3);
+        when(rowReader.streamInBinaryOrder(any(), anyInt(), anyInt(), any())).thenAnswer(invocation -> {
+            StreamingRowReader.RowHandler handler = invocation.getArgument(3);
             for (String[] row : rows) {
                 handler.handle(resultSetOf(row));
             }

@@ -4,6 +4,8 @@ import com.axonect.ee.enterpriseintegration.domain.service.impl.*;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+
 @Component
 public class ReportDefinitionInitializer {
 
@@ -14,6 +16,7 @@ public class ReportDefinitionInitializer {
     private final ErrorLogReportDefinition errorLogReportDefinition;
     private final AuditLogReportDefinition auditLogReportDefinition;
     private final UserDataDumpReportDefinition userDataDumpReportDefinition;
+    private final List<TableExtractReportDefinition> tableExtractReportDefinitions;
 
     public ReportDefinitionInitializer(MessageLogReportDefinition messageLogDefinition,
                                        SessionHistoryReportDefinition sessionHistoryReportDefinition,
@@ -21,7 +24,8 @@ public class ReportDefinitionInitializer {
                                        SubscriberDetailsReportDefinition subscriberDetailsReportDefinition,
                                        ErrorLogReportDefinition errorLogReportDefinition,
                                        AuditLogReportDefinition auditLogReportDefinition,
-                                       UserDataDumpReportDefinition userDataDumpReportDefinition) {
+                                       UserDataDumpReportDefinition userDataDumpReportDefinition,
+                                       List<TableExtractReportDefinition> tableExtractReportDefinitions) {
 
         this.messageLogDefinition = messageLogDefinition;
         this.productDetailsReportDefinition = productDetailsReportDefinition;
@@ -30,6 +34,7 @@ public class ReportDefinitionInitializer {
         this.errorLogReportDefinition = errorLogReportDefinition;
         this.auditLogReportDefinition = auditLogReportDefinition;
         this.userDataDumpReportDefinition = userDataDumpReportDefinition;
+        this.tableExtractReportDefinitions = tableExtractReportDefinitions;
     }
 
     @PostConstruct
@@ -41,5 +46,11 @@ public class ReportDefinitionInitializer {
         ReportDefinitionsRegistry.register("ERROR_LOGS", errorLogReportDefinition);
         ReportDefinitionsRegistry.register("AUDIT_LOGS", auditLogReportDefinition);
         ReportDefinitionsRegistry.register(UserDataDumpReportDefinition.REPORT_TYPE, userDataDumpReportDefinition);
+
+        // The table extracts already know what they are called, so they are registered from their
+        // own report type rather than from a list repeated here — adding one is a bean, not an
+        // edit in two places that can disagree.
+        tableExtractReportDefinitions.forEach(
+                definition -> ReportDefinitionsRegistry.register(definition.reportType(), definition));
     }
 }
