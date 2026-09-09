@@ -38,7 +38,9 @@ public final class TableExtractSql {
      *
      * @param label     header written to the CSV, and the name the consuming system knows the
      *                  column by — it is not always the name of the underlying schema column
-     * @param source    qualified column, or any expression over the from clause
+     * @param source    qualified column, or — for a plain column — any expression over the from
+     *                  clause. A timestamp source is CAST before it is rendered, so it has to be a
+     *                  column reference and nothing else; see {@link OracleText#validateColumn}
      * @param timestamp whether the source is a date/timestamp that must be rendered under the
      *                  extract's format model rather than the session's NLS settings
      */
@@ -49,7 +51,11 @@ public final class TableExtractSql {
             return new Column(label, source, false);
         }
 
-        /** A date or timestamp column, rendered with the extract's own format model. */
+        /**
+         * A date or timestamp column, rendered with the extract's own format model. The source
+         * goes inside a CAST, so it is a column reference — an alias or an expression there ends
+         * the statement rather than the column.
+         */
         public static Column at(String label, String source) {
             return new Column(label, source, true);
         }

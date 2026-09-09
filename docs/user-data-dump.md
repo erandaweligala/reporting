@@ -81,6 +81,19 @@ version-dependent construct into this statement fails the whole dump, not one co
 statement is rejected, `StreamingRowReader` now logs the statement text alongside the ORA error so
 the next one can be diagnosed from the log rather than guessed at.
 
+**Aliases go outside the `CAST`, never into the column.** The same ORA-00907 came back a second
+time, from something plainer than a version-dependent construct: a column alias written into the
+operand of a cast — `CAST(u.CREATED_DATE as CUSTOMER_ACTIVATION_DATE AS TIMESTAMP)` — puts a second
+`AS` where the cast's closing bracket belongs, so Oracle rejects the statement before it looks at
+anything else, on every shard of every run. The dump's five rendered timestamps do carry the dump's
+column names (`CREATED_DATE`, `UPDATED_DATE`, `CUSTOMER_ACTIVATION_DATE`, `BUNDLE_ACTIVATION_DATE`,
+`BUNDLE_DEACTIVATION_DATE`), which is worth having in the logged statement when two of them render
+the same `AAA_USER.CREATED_DATE` into different columns — but the name is given to the finished
+`TO_CHAR`, by an argument, not spliced into the column. `OracleText` now refuses a column that
+carries an alias, an expression, or anything else that is not a plain column reference, so a
+mistake of that shape fails in Java with the fragment named rather than at the database with only
+an ORA number to go on.
+
 **One cursor, not pages.** Rows stream off an open, read-only, forward-only JDBC cursor with a
 5 000 row fetch size (`StreamingRowReader`). Offset pagination — what the paged report framework
 does — re-walks and discards everything before each page, so the cost of the last page grows with

@@ -180,6 +180,40 @@ class UserDumpSqlTest {
     }
 
     @Test
+    void namesEveryRenderedTimestampAfterTheDumpColumnItFills() {
+        String sql = build(null, null).sql();
+
+        // A TO_CHAR has no column name of its own, and two of these render the very same column
+        // into different dump columns, so the statement in the log says which is which.
+        for (String named : List.of(
+                "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP), '" + DATE_FORMAT + "') AS CREATED_DATE",
+                "TO_CHAR(CAST(u.UPDATED_DATE AS TIMESTAMP), '" + DATE_FORMAT + "') AS UPDATED_DATE",
+                "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP), '" + DATE_FORMAT
+                        + "') AS CUSTOMER_ACTIVATION_DATE",
+                "TO_CHAR(CAST(svc.SERVICE_START_DATE AS TIMESTAMP), '" + DATE_FORMAT
+                        + "') AS BUNDLE_ACTIVATION_DATE",
+                "TO_CHAR(CAST(svc.EXPIRY_DATE AS TIMESTAMP), '" + DATE_FORMAT
+                        + "') AS BUNDLE_DEACTIVATION_DATE")) {
+            assertTrue(sql.contains(named), "the statement must select " + named);
+        }
+    }
+
+    @Test
+    void carriesNoAliasInsideACastBecauseThatIsTheOtherWayToEarnOra00907() {
+        String sql = build("a", "m").sql();
+
+        // CAST(u.CREATED_DATE as CUSTOMER_ACTIVATION_DATE AS TIMESTAMP) — an alias written into
+        // the operand rather than onto the finished expression — puts a second AS where the cast's
+        // closing bracket belongs, and Oracle rejects the whole statement, every shard, every run.
+        for (int start = sql.indexOf("CAST("); start >= 0; start = sql.indexOf("CAST(", start + 1)) {
+            String cast = sql.substring(start, endOfBracket(sql, start + "CAST".length()));
+            assertEquals(1, countOccurrences(cast, " AS "),
+                    "a CAST takes exactly one AS, and it is the one naming the type: " + cast);
+            assertTrue(cast.endsWith(" AS TIMESTAMP)"), "the cast's own AS names the type: " + cast);
+        }
+    }
+
+    @Test
     void anUnlimitedQuotaBucketLeavesTheQuotaColumnEmpty() {
         String sql = build(null, null).sql();
 
@@ -197,6 +231,19 @@ class UserDumpSqlTest {
                 "BANDWIDTH", "DATA", "YYYY') || (SELECT PASSWORD FROM AAA_USER) || ('"));
         assertThrows(IllegalArgumentException.class, () -> UserDumpSql.build(null, null, DAY_START, DAY_END,
                 "BANDWIDTH", "DATA", "  "));
+    }
+
+    /** Index just past the bracket opened at {@code open}. */
+    private static int endOfBracket(String sql, int open) {
+        int depth = 0;
+        for (int i = open; i < sql.length(); i++) {
+            if (sql.charAt(i) == '(') {
+                depth++;
+            } else if (sql.charAt(i) == ')' && --depth == 0) {
+                return i + 1;
+            }
+        }
+        throw new AssertionError("unbalanced brackets from index " + open + ": " + sql);
     }
 
     private static int countPlaceholders(String sql) {

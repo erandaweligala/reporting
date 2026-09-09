@@ -77,6 +77,14 @@ public final class UserDumpSql {
      * Nothing left in this statement is newer than the parser that rejected it. Keep it that way:
      * a construct that needs a particular server version fails the entire dump, not one column.
      *
+     * <p>The same error has a second, plainer cause, and this statement has earned it too: a column
+     * alias written into the operand of a CAST — {@code CAST(u.CREATED_DATE as
+     * CUSTOMER_ACTIVATION_DATE AS TIMESTAMP)} — puts a second AS where the cast's closing bracket
+     * belongs, and Oracle rejects the statement before it looks at anything else. Aliases go on the
+     * finished expression, never into the column: {@link #asText} takes the name as an argument for
+     * exactly that reason, and {@link OracleText#validateColumn} refuses a column that carries one
+     * rather than letting it reach the database.
+     *
      * @param usernameFrom    inclusive lower bound of the shard's username range, null for open
      * @param usernameTo      exclusive upper bound of the shard's username range, null for open
      * @param dayStart        start of the reported day (inclusive)
@@ -127,20 +135,20 @@ public final class UserDumpSql {
 
         sql.append(" SELECT u.USER_NAME, u.GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
            .append("        u.CONCURRENCY, u.CONTACT_EMAIL, u.CONTACT_NAME, u.CONTACT_NUMBER,")
-           .append("        ").append(asText("u.CREATED_DATE", fmt)).append(",")
+           .append("        ").append(asText("u.CREATED_DATE", fmt, "CREATED_DATE")).append(",")
            .append("        u.CUSTOM_TIMEOUT, u.CYCLE_DATE, u.ENCRYPTION_METHOD, u.GROUP_ID, u.IDLE_TIMEOUT,")
            .append("        u.IP_ALLOCATION, u.IP_POOL_NAME, u.IPV4, u.IPV6, mac.MAC_ADDRESS,")
            .append("        u.NAS_PORT_TYPE, mac.ORIGINAL_MAC_ADDRESS, u.REMOTE_ID, u.REQUEST_ID,")
            .append("        u.SESSION_TIMEOUT, u.STATUS, u.SUBSCRIPTION,")
-           .append("        ").append(asText("u.UPDATED_DATE", fmt)).append(",")
+           .append("        ").append(asText("u.UPDATED_DATE", fmt, "UPDATED_DATE")).append(",")
            // AAA_USER carries no SLMN column, so the dump reports the username under it; and no
            // NAS_IP_ADDRESS either — that one is filled from the CDR session documents in
            // Elasticsearch, so nothing is selected for it here.
            .append("        u.USER_NAME AS SLMN, u.VLAN_ID, u.NOTIFICATION_TEMPLATES,")
-           .append("        ").append(asText("u.CREATED_DATE", fmt)).append(",")
-           .append("        ").append(asText("svc.SERVICE_START_DATE", fmt)).append(",")
+           .append("        ").append(asText("u.CREATED_DATE", fmt, "CUSTOMER_ACTIVATION_DATE")).append(",")
+           .append("        ").append(asText("svc.SERVICE_START_DATE", fmt, "BUNDLE_ACTIVATION_DATE")).append(",")
            .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")
-           .append("        ").append(asText("svc.EXPIRY_DATE", fmt)).append(",")
+           .append("        ").append(asText("svc.EXPIRY_DATE", fmt, "BUNDLE_DEACTIVATION_DATE")).append(",")
            .append("        bkt.QUOTA_BUCKET_ID")
            .append(" FROM AAA_USER u")
            .append(" LEFT JOIN svc ON svc.USERNAME = u.USER_NAME")
@@ -161,9 +169,20 @@ public final class UserDumpSql {
         return new SqlStatement(sql.toString(), params);
     }
 
-    /** Renders one timestamp column as text under the configured format model. */
-    private static String asText(String column, String format) {
-        return OracleText.timestampAsText(column, format);
+    /**
+     * Renders one timestamp column as text under the configured format model, named after the dump
+     * column it fills.
+     *
+     * <p>The name is passed to {@link OracleText} rather than written into {@code column}: in the
+     * column it would land inside the CAST and take the whole statement down with ORA-00907 — see
+     * {@link OracleText#timestampAsText(String, String, String)}. Naming them is worth the care.
+     * Five of these expressions have no name of their own, two of them render the very same
+     * column into different dump columns, and the statement is read in the log after the database
+     * has rejected it, where a TO_CHAR that says which dump column it fills is the difference
+     * between reading the statement and counting the select list.
+     */
+    private static String asText(String column, String format, String alias) {
+        return OracleText.timestampAsText(column, format, alias);
     }
 
     private static void appendWhereRange(StringBuilder sql, List<Object> params, String column,
