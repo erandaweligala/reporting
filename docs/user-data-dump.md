@@ -9,7 +9,7 @@ make it survive that row count, and the settings an operator needs.
 | Columns | Source |
 | --- | --- |
 | `USER_ID`, and every column not listed below | `AAA_USER` |
-| `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, comma-joined per user with `LISTAGG` (see below) |
+| `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, one cursor row each, comma-joined per user as the rows are read (see below) |
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
 | `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
@@ -53,23 +53,33 @@ shard   │   [ , "g")    │   ["g", "s")  │   ["s",  )    │
              dump.csv        part-1          part-2      → concatenated in shard order
 ```
 
-**One query, not four.** The MAC addresses, the active bundle and its buckets are folded into the
-dump statement as pre-aggregated inline views (`UserDumpSql`). Fetching them per user would be
-three round trips per row — around nine million on a three million row dump. Each view collapses
-its table in one pass and is hash-joined; the bucket view is joined to the bundle view so the
-optimizer prunes it to the shard's own services rather than scanning `BUCKET_INSTANCE` whole.
+**One query, not four.** The active bundle, its buckets and the MAC addresses all come off the one
+dump statement (`UserDumpSql`) — the first two as pre-aggregated inline views, the third as a plain
+join. Fetching them per user would be three round trips per row, around nine million on a three
+million row dump. Each view collapses its table in one pass and is hash-joined; the bucket view is
+joined to the bundle view so the optimizer prunes it to the shard's own services rather than
+scanning `BUCKET_INSTANCE` whole.
 
-**MAC lists truncated, not overflowed.** `LISTAGG` returns a `VARCHAR2`, so a user with enough
-MAC addresses to push the joined list past 4 000 bytes would raise ORA-01489 and fail the run.
-Oracle has a clause for exactly that — `ON OVERFLOW TRUNCATE` — but it only parses on 12.2 and
-later: an older server reaches the `ON` where it expects the closing bracket of the argument list
-and rejects the whole statement with **ORA-00907 (missing right parenthesis)**, which is a failed
-dump rather than a shortened MAC list. So `UserDumpSql` spends the byte budget itself, in the
-inline view: a running total charges each row the wider of its two addresses, rows past 4 000 bytes
-never reach the aggregate, and `LISTAGG` is left in syntax every supported Oracle understands.
-Cutting both lists at the same row also keeps `MAC_ADDRESS` and `ORIGINAL_MAC_ADDRESS`
-row-aligned, which a per-column overflow clause would not. Do not put the overflow clause back
-without first establishing the server version.
+**MAC lists joined in Java, because `LISTAGG` is what the server rejects.** Every run of this
+report failed with **ORA-00907 (missing right parenthesis)** for as long as the statement collapsed
+the MAC addresses with `LISTAGG`. The first attempt at it blamed `LISTAGG`'s own
+`ON OVERFLOW TRUNCATE` clause, which is 12.2 and later; removing the clause changed nothing,
+because the server rejects `LISTAGG(...) WITHIN GROUP (...)` itself — reaching the `WITHIN` where
+it expects the subquery's closing bracket produces exactly the same error. So the aggregate is gone
+from the statement: `AAA_USER_MAC_ADDRESS` is joined row for row and the cursor hands out one row
+per MAC address, which `UserDataDumpReportDefinition` joins up as it reads them. The shard bounds
+go inside that join's `ON` clause — in the `WHERE` clause they would turn the outer join into an
+inner one and drop every user who holds no MAC address.
+
+That costs the extra rows the fan-out produces (a user with three addresses arrives three times)
+and buys three things: nothing in the statement is newer than Oracle 9i, the `VARCHAR2` limit that
+made `LISTAGG` raise ORA-01489 past 4 000 bytes no longer applies at all, and the byte budget that
+guarded against it is now spent in Java. The budget itself is kept, and kept the same way —
+each address is charged the wider of the row's two values, so both lists are cut at the same
+address and `MAC_ADDRESS` and `ORIGINAL_MAC_ADDRESS` stay row-aligned. Anything reintroducing a
+version-dependent construct into this statement fails the whole dump, not one column; when a
+statement is rejected, `StreamingRowReader` now logs the statement text alongside the ORA error so
+the next one can be diagnosed from the log rather than guessed at.
 
 **One cursor, not pages.** Rows stream off an open, read-only, forward-only JDBC cursor with a
 5 000 row fetch size (`StreamingRowReader`). Offset pagination — what the paged report framework
@@ -193,7 +203,8 @@ starting point, not a maximum.
   what the sample extract shows and what the CDR documents are keyed on.
 - `MAC_ADDRESS` is taken from `AAA_USER_MAC_ADDRESS` alongside `ORIGINAL_MAC_ADDRESS`, not from
   `AAA_USER`. The sample extract carries three comma-separated values in both columns, which only
-  the per-MAC table can produce.
+  the per-MAC table can produce. `AAA_USER_MAC_ADDRESS.ID` is what orders a user's addresses within
+  their row.
 - `BUCKET_INSTANCE.BUCKET_TYPE` distinguishes the bandwidth bucket from the data bucket, and
   `BUCKET_ID` carries the bandwidth name (`FTTH_50Mbps` in the sample). Both type values are
   configurable above. `IS_UNLIMITED = 1` marks a bucket with no cap, and such a bucket is reported
