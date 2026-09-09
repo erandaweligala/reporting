@@ -1,0 +1,476 @@
+{
+  "info": {
+    "name": "CSV dumps — create, poll, download",
+    "description": "The four CSV dumps this service produces — USER_DATA_DUMP, MAC_SERVICE_TABLE, PLAN_TO_BUCKET and BUCKET_INSTANCE — end to end.\n\nA run is always three steps, because generation is asynchronous and the create call does not return the report id:\n\n1. POST /api/report-download/create — accepted immediately, the row is saved as Pending.\n2. POST /api/report-management/filter — read the row back: its id, and its status (Pending -> Processing -> Completed, or Failed / No Records).\n3. GET /api/report-download/download?id={id} — the finished CSV.\n\nAll four are streaming reports and are CSV only. Leaving `format` out of the create body is correct: the mapper defaults a streaming report to CSV. Naming EXCEL is accepted by the create call and then fails the run.\n\nSet `baseUrl` and `userId` (in the environment) before sending anything. The folders are ordered so the Collection Runner can execute the whole collection top to bottom.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "userId", "value": "operator", "type": "string" },
+    { "key": "classificationLevel", "value": "Confidential", "type": "string" },
+    { "key": "reportType", "value": "USER_DATA_DUMP", "type": "string" },
+    { "key": "reportId", "value": "", "type": "string" },
+    { "key": "reportStatus", "value": "", "type": "string" },
+    { "key": "pollAttempt", "value": "0", "type": "string" },
+    { "key": "pollMaxAttempts", "value": "120", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1 · Create a run",
+      "description": "One request per dump. Each sets `reportType`, so the filter and download requests that follow act on whichever one you sent last.\n\nThe response is 2001 \"Report Download in progress\" — an acknowledgement, not a report id. Concurrency is capped at 5 in-flight reports; beyond that a run waits as Pending and is picked up as slots free.",
+      "item": [
+        {
+          "name": "Create — USER_DATA_DUMP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"reportType\", \"USER_DATA_DUMP\");",
+                  "",
+                  "pm.test(\"create accepted\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success, \"success flag\").to.eql(true);",
+                  "});",
+                  "",
+                  "// The id is deliberately not in this response — read it back with the filter call.",
+                  "pm.collectionVariables.set(\"reportId\", \"\");",
+                  "pm.collectionVariables.set(\"pollAttempt\", \"0\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}", "description": "Recorded as CREATED_BY on the report row." }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportType\": \"USER_DATA_DUMP\",\n  \"classificationLevel\": \"{{classificationLevel}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/create",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "create"]
+            },
+            "description": "The D-1 subscriber base extract: one row per AAA user, ~3 M rows. Sharded across username ranges and merge-joined against the Elasticsearch usage aggregation, so this is the longest of the four runs.\n\n`format` is omitted on purpose — a streaming report defaults to CSV."
+          }
+        },
+        {
+          "name": "Create — MAC_SERVICE_TABLE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"reportType\", \"MAC_SERVICE_TABLE\");",
+                  "",
+                  "pm.test(\"create accepted\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success, \"success flag\").to.eql(true);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set(\"reportId\", \"\");",
+                  "pm.collectionVariables.set(\"pollAttempt\", \"0\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportType\": \"MAC_SERVICE_TABLE\",\n  \"classificationLevel\": \"{{classificationLevel}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/create",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "create"]
+            },
+            "description": "SERVICE_INSTANCE left-joined to AAA_USER for GROUP_ID — one row per service, ~3 M. SERVICE_ID here is what BUCKET_INSTANCE.SERVICE_ID points at."
+          }
+        },
+        {
+          "name": "Create — PLAN_TO_BUCKET",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"reportType\", \"PLAN_TO_BUCKET\");",
+                  "",
+                  "pm.test(\"create accepted\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success, \"success flag\").to.eql(true);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set(\"reportId\", \"\");",
+                  "pm.collectionVariables.set(\"pollAttempt\", \"0\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportType\": \"PLAN_TO_BUCKET\",\n  \"classificationLevel\": \"{{classificationLevel}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/create",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "create"]
+            },
+            "description": "The plan catalogue's bucket definitions — thousands of rows, so this run finishes in seconds. It is still CSV only, so that the three files loaded together are always the same format."
+          }
+        },
+        {
+          "name": "Create — BUCKET_INSTANCE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set(\"reportType\", \"BUCKET_INSTANCE\");",
+                  "",
+                  "pm.test(\"create accepted\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success, \"success flag\").to.eql(true);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set(\"reportId\", \"\");",
+                  "pm.collectionVariables.set(\"pollAttempt\", \"0\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportType\": \"BUCKET_INSTANCE\",\n  \"classificationLevel\": \"{{classificationLevel}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/create",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "create"]
+            },
+            "description": "One row per bucket per service — the largest of the three table extracts, > 3 M rows."
+          }
+        },
+        {
+          "name": "Create — any type (parameterised)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"create accepted\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().success, \"success flag\").to.eql(true);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set(\"reportId\", \"\");",
+                  "pm.collectionVariables.set(\"pollAttempt\", \"0\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportType\": \"{{reportType}}\",\n  \"classificationLevel\": \"{{classificationLevel}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/create",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "create"]
+            },
+            "description": "Sends whatever `reportType` currently holds. Handy with a Runner data file (a CSV of one `reportType` column) to fire all four in one pass."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 · Find the run and wait for it",
+      "description": "The create call does not return the id, so it is read back here. Rows come newest first (`createdAt` DESC), so the run just created is `data.reportDetails[0]`.\n\nNote: the filter ignores `createdBy` server-side — it is accepted in the body but not applied — so filter by `reportType` and, if you like, `reportStatus`.",
+      "item": [
+        {
+          "name": "Filter — latest run of {{reportType}}",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"filter returned 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const rows = (body.data && body.data.reportDetails) || [];",
+                  "",
+                  "pm.test(\"a run exists for \" + pm.collectionVariables.get(\"reportType\"), function () {",
+                  "    pm.expect(rows.length, \"report rows\").to.be.above(0);",
+                  "});",
+                  "",
+                  "if (rows.length > 0) {",
+                  "    const latest = rows[0];  // createdAt DESC",
+                  "    pm.collectionVariables.set(\"reportId\", String(latest.id));",
+                  "    pm.collectionVariables.set(\"reportStatus\", latest.reportStatus);",
+                  "    console.log(\"report \" + latest.id + \" (\" + latest.reportType + \", \" + latest.format + \") is \" + latest.reportStatus);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"page\": 1,\n  \"pageSize\": 10,\n  \"reportType\": \"{{reportType}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-management/filter",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-management", "filter"]
+            },
+            "description": "Captures `reportId` and `reportStatus` from the newest matching row.\n\nOptional body fields: `reportStatus` (\"Pending\", \"Processing\", \"Completed\", \"Failed\", \"No Records\"), `startDate` / `endDate` as ISO local date-times."
+          }
+        },
+        {
+          "name": "Poll until Completed (Collection Runner only)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Re-sends itself until the run leaves Pending/Processing. setNextRequest is a Runner",
+                  "// feature — sending this on its own just performs one status check, which is fine too.",
+                  "// Set a delay (Runner settings, e.g. 5000 ms) so this does not hammer the service.",
+                  "",
+                  "const body = pm.response.json();",
+                  "const rows = (body.data && body.data.reportDetails) || [];",
+                  "const attempt = Number(pm.collectionVariables.get(\"pollAttempt\") || 0) + 1;",
+                  "const max = Number(pm.collectionVariables.get(\"pollMaxAttempts\") || 120);",
+                  "pm.collectionVariables.set(\"pollAttempt\", String(attempt));",
+                  "",
+                  "if (rows.length === 0) {",
+                  "    pm.test(\"a run exists\", function () { pm.expect.fail(\"no report rows for \" + pm.collectionVariables.get(\"reportType\")); });",
+                  "    return;",
+                  "}",
+                  "",
+                  "const latest = rows[0];",
+                  "const status = latest.reportStatus;",
+                  "pm.collectionVariables.set(\"reportId\", String(latest.id));",
+                  "pm.collectionVariables.set(\"reportStatus\", status);",
+                  "console.log(\"attempt \" + attempt + \": report \" + latest.id + \" is \" + status);",
+                  "",
+                  "if (status === \"Completed\") {",
+                  "    pm.collectionVariables.set(\"pollAttempt\", \"0\");",
+                  "    pm.test(\"run completed\", function () { pm.expect(status).to.eql(\"Completed\"); });",
+                  "} else if (status === \"Failed\" || status === \"No Records\") {",
+                  "    pm.collectionVariables.set(\"pollAttempt\", \"0\");",
+                  "    pm.test(\"run completed\", function () {",
+                  "        pm.expect.fail(\"run ended as \" + status + \" — check the service log for report \" + latest.id);",
+                  "    });",
+                  "} else if (attempt < max) {",
+                  "    postman.setNextRequest(pm.info.requestName);",
+                  "} else {",
+                  "    pm.collectionVariables.set(\"pollAttempt\", \"0\");",
+                  "    pm.test(\"run completed\", function () {",
+                  "        pm.expect.fail(\"still \" + status + \" after \" + max + \" attempts\");",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"page\": 1,\n  \"pageSize\": 1,\n  \"reportType\": \"{{reportType}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-management/filter",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-management", "filter"]
+            },
+            "description": "A run of a few million rows takes minutes. A watchdog marks a run that sits in Processing past `report.watchdog.stale-threshold-minutes` as Failed, so a poll cannot hang forever."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 · Download the CSV",
+      "item": [
+        {
+          "name": "Download report CSV",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"file served\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test(\"served as a CSV attachment\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\") || \"\").to.include(\"text/csv\");",
+                  "    pm.expect(pm.response.headers.get(\"Content-Disposition\") || \"\").to.include(\"attachment\");",
+                  "});",
+                  "",
+                  "const disposition = pm.response.headers.get(\"Content-Disposition\") || \"\";",
+                  "const match = disposition.match(/filename=\"?([^\";]+)\"?/);",
+                  "if (match) { console.log(\"filename: \" + match[1]); }",
+                  "",
+                  "const firstLine = (pm.response.text() || \"\").split(/\\r?\\n/)[0];",
+                  "console.log(\"header: \" + firstLine);",
+                  "pm.test(\"header line is present\", function () {",
+                  "    pm.expect(firstLine, \"first line\").to.not.be.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/download?id={{reportId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "download"],
+              "query": [
+                { "key": "id", "value": "{{reportId}}", "description": "The REPORT_DOWNLOAD row id, captured by the filter request." }
+              ]
+            },
+            "description": "Streams the file from `report.output.directory`, named `{id}_{REPORT_TYPE}_yyyy_MM_dd_HH_mm_ss.csv`, as `text/csv` with `Content-Disposition: attachment`.\n\nUse Postman's **Send and Download** (the arrow next to Send) to write it to disk — a three-million-row CSV should not be rendered in the response pane. For a file that size prefer curl:\n\n    curl -OJ \"$BASE/api/report-download/download?id=$ID\"\n\nThe lookup is by filename prefix `{id}_`, and the newest match wins if a report was regenerated."
+        }
+        }
+      ]
+    },
+    {
+      "name": "4 · Failure cases worth knowing",
+      "item": [
+        {
+          "name": "Download before the run finishes → 4005",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// While the run is Pending or Processing no file exists yet. The service answers",
+                  "// responseCode 4005 with the report's current status appended — and, because only",
+                  "// code 4000 is mapped to 400, the HTTP status is 500 rather than a 404.",
+                  "pm.test(\"answers 4005 with the current status\", function () {",
+                  "    pm.response.to.have.status(500);",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.responseCode).to.eql(\"4005\");",
+                  "    pm.expect(body.responseDescription).to.include(\"Report file not found\");",
+                  "    console.log(body.responseDescription);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/download?id={{reportId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "download"],
+              "query": [{ "key": "id", "value": "{{reportId}}" }]
+            },
+            "description": "Send this straight after a create, before the run finishes. The description carries the live status (\"Report file not found. Current status: Processing\"), which makes polling this endpoint a legitimate way to wait.\n\nAn id that has no row at all answers 4004 instead."
+          }
+        },
+        {
+          "name": "Create with format EXCEL → the run fails",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The create call still returns 200: the format is only rejected once the report",
+                  "// executor picks the run up, so the failure shows as reportStatus = Failed on the",
+                  "// filter call, not here.",
+                  "pm.test(\"create accepted\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "console.log(\"now filter this reportType — the run should end as Failed\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "userId", "value": "{{userId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportType\": \"PLAN_TO_BUCKET\",\n  \"format\": \"EXCEL\",\n  \"classificationLevel\": \"{{classificationLevel}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/report-download/create",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "report-download", "create"]
+            },
+            "description": "All four dumps are CSV only, PLAN_TO_BUCKET included even though it is small enough for a spreadsheet — the three table extracts are loaded together and must be the same format. Omit `format`, or send \"CSV\"."
+          }
+        }
+      ]
+    }
+  ]
+}
