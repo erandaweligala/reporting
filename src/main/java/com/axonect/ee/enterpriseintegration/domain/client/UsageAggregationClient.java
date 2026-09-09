@@ -2,6 +2,7 @@ package com.axonect.ee.enterpriseintegration.domain.client;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.FieldValue;
+import co.elastic.clients.elasticsearch._types.aggregations.Aggregate;
 import co.elastic.clients.elasticsearch._types.aggregations.Aggregation;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeAggregationSource;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeBucket;
@@ -38,6 +39,12 @@ import java.util.Map;
  * the hits would be tens of millions of documents over the wire, whereas the aggregation ships one
  * number per user per bucket and pages deterministically through {@code after_key} with no scroll
  * context left open on the cluster.
+ *
+ * <p>The same pass also reports each user's NAS IP address, which AAA_USER does not carry: it is
+ * the {@code nasIpAddress} cdr-service records on the session document from the CDR every
+ * accounting event carries. A user's sessions can name more than one NAS across a day, so it is
+ * read as a small terms aggregation and the most-used address wins — doc values only, no fetch
+ * phase, which is what keeps 3 million users affordable next to a {@code top_hits} per user.
  */
 @Component
 @Slf4j
@@ -49,6 +56,7 @@ public class UsageAggregationClient {
     private static final String AGG_INSTANCES = "instances";
     private static final String AGG_BY_BUCKET = "by_bucket";
     private static final String AGG_USAGE = "usage";
+    private static final String AGG_NAS_IP = "nas_ip";
     private static final String USERNAME_FIELD = "userName.keyword";
 
     private final ObjectProvider<ElasticsearchClient> clientProvider;
@@ -66,7 +74,7 @@ public class UsageAggregationClient {
     }
 
     /**
-     * Opens a usage cursor over one day, restricted to a shard's username range.
+     * Opens a cursor over one day's session documents, restricted to a shard's username range.
      *
      * @param day            the day being reported on
      * @param usernameFrom   inclusive lower bound of the shard's username range, null for open
@@ -75,7 +83,7 @@ public class UsageAggregationClient {
     public UserUsageCursor open(LocalDate day, String usernameFrom, String usernameTo) {
         UserDumpProperties.Usage usage = properties.getUsage();
         if (!usage.isEnabled()) {
-            log.info("Usage lookup disabled — UTLIZED_QUOTA will be left empty");
+            log.info("Elasticsearch lookup disabled — UTLIZED_QUOTA and NAS_IP_ADDRESS will be left empty");
             return UserUsageCursor.empty();
         }
 
@@ -188,11 +196,19 @@ public class UsageAggregationClient {
             String instancesPath = config.getInstancesPath();
             String usageField = instancesPath + ".usage";
 
+            // The NAS address is a scalar on the session document, not on an instance, so it is
+            // read beside the usage aggregation whether or not the instances are nested.
+            Aggregation nasIp = new Aggregation.Builder()
+                    .terms(t -> t.field(config.getNasIpField()).size(config.getNasAddressesPerUser()))
+                    .build();
+
             if (!config.isNested()) {
                 // Without a nested mapping Elasticsearch flattens the instance array, so a
                 // per-bucket sum would credit every bucket with the whole session's usage. Sum the
                 // user's day instead and report it as unattributed.
-                return Map.of(AGG_USAGE, Aggregation.of(a -> a.sum(s -> s.field(usageField))));
+                return Map.of(
+                        AGG_USAGE, Aggregation.of(a -> a.sum(s -> s.field(usageField))),
+                        AGG_NAS_IP, nasIp);
             }
 
             Aggregation byBucket = new Aggregation.Builder()
@@ -205,7 +221,7 @@ public class UsageAggregationClient {
                     .aggregations(AGG_BY_BUCKET, byBucket)
                     .build();
 
-            return Map.of(AGG_INSTANCES, instances);
+            return Map.of(AGG_INSTANCES, instances, AGG_NAS_IP, nasIp);
         }
 
         private UserUsage toUserUsage(CompositeBucket bucket) {
@@ -214,10 +230,11 @@ public class UsageAggregationClient {
                 return null;
             }
             String userName = key.stringValue();
+            String nasIpAddress = nasIpAddressOf(bucket);
 
             if (!config.isNested()) {
                 double total = bucket.aggregations().get(AGG_USAGE).sum().value();
-                return new UserUsage(userName, noBuckets(), (long) total, false);
+                return new UserUsage(userName, noBuckets(), (long) total, false, nasIpAddress);
             }
 
             List<StringTermsBucket> bucketTerms = bucket.aggregations()
@@ -232,12 +249,28 @@ public class UsageAggregationClient {
                 perBucket.put(term.key().stringValue(), value);
                 total += value;
             }
-            return new UserUsage(userName, perBucket, total, true);
+            return new UserUsage(userName, perBucket, total, true, nasIpAddress);
+        }
+
+        /**
+         * The address most of the user's sessions were anchored to, or null when none of them
+         * reported one — a session cached before cdr-service recorded the field, or a CDR that
+         * omitted it, leaves the document without the value rather than with an empty one.
+         */
+        private String nasIpAddressOf(CompositeBucket bucket) {
+            Aggregate aggregate = bucket.aggregations().get(AGG_NAS_IP);
+            // An index whose mapping predates the field answers with no terms at all — the dump
+            // reports an empty NAS_IP_ADDRESS for that day rather than failing over it.
+            if (aggregate == null || !aggregate.isSterms()) {
+                return null;
+            }
+            List<StringTermsBucket> addresses = aggregate.sterms().buckets().array();
+            return addresses.isEmpty() ? null : addresses.get(0).key().stringValue();
         }
     }
 
     /** Exposed for tests: the aggregation names this client reads back. */
     static List<String> aggregationNames() {
-        return new ArrayList<>(List.of(AGG_BY_USER, AGG_INSTANCES, AGG_BY_BUCKET, AGG_USAGE));
+        return new ArrayList<>(List.of(AGG_BY_USER, AGG_INSTANCES, AGG_BY_BUCKET, AGG_USAGE, AGG_NAS_IP));
     }
 }

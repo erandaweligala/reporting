@@ -93,10 +93,11 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
-    void writesEachDatabaseColumnIntoItsAgreedPositionAndFillsUsageFromElasticsearch() throws Exception {
+    void writesEachDatabaseColumnIntoItsAgreedPositionAndFillsTheRestFromElasticsearch() throws Exception {
         String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "107374182400", "DATA_1");
         stubReader(List.<String[]>of(dbRow));
-        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 70093948746L)));
+        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 70093948746L)),
+                Map.of("taiwowilliams", "10.20.30.40"));
 
         Path output = outputWithHeader("dump.csv");
         long rows = definition.streamTo(report(), output);
@@ -108,14 +109,34 @@ class UserDataDumpReportDefinitionTest {
         String[] written = lines.get(1).split(",", -1);
         assertEquals(39, written.length);
         assertEquals("taiwowilliams", written[0]);
-        // Result set columns 1..37 land on CSV columns 1..37 untouched.
+        // Result set columns 1..30 land on CSV columns 1..30 untouched.
         assertEquals("col20", written[19], "MAC_ADDRESS");
         assertEquals("col22", written[21], "ORIGINAL_MAC_ADDRESS");
+        assertEquals("taiwowilliams", written[28], "SLMN carries the username, which AAA_USER has no column for");
+        assertEquals("col30", written[29], "VLAN_ID");
+        // The NAS address is spliced in from Elasticsearch, and the database columns after it
+        // shift back into place rather than trailing one position short.
+        assertEquals("10.20.30.40", written[30], "NAS_IP_ADDRESS");
+        assertEquals("col31", written[31], "NOTIFICATION_TEMPLATES");
         assertEquals("FTTH_50Mbps", written[35], "PLAN_BANDWIDTH");
         assertEquals("107374182400", written[36], "QUOTA");
-        // ...then usage is spliced in, and the last database column follows it.
+        // ...then usage is spliced in too, and the last database column follows it.
         assertEquals("70093948746", written[37], "UTLIZED_QUOTA");
         assertEquals("bundle-end", written[38], "BUNDLE_DEACTIVATION_DATE");
+    }
+
+    @Test
+    void aUserWhoseSessionsNamedNoNasLeavesTheColumnEmptyWithoutShiftingTheRow() throws Exception {
+        stubReader(List.<String[]>of(databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1")));
+        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+
+        Path output = outputWithHeader("no-nas.csv");
+        definition.streamTo(report(), output);
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals(39, written.length);
+        assertEquals("", written[30], "NAS_IP_ADDRESS");
+        assertEquals("col31", written[31], "NOTIFICATION_TEMPLATES");
     }
 
     @Test
@@ -136,7 +157,7 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
-    void usersWithoutUsageThatDayGetAnEmptyUtilizedQuota() throws Exception {
+    void usersWithoutSessionsThatDayGetAnEmptyUtilizedQuotaAndNasAddress() throws Exception {
         stubReader(List.<String[]>of(databaseRow("quietuser", "FTTH_50Mbps", "1024", "DATA_1")));
         stubUsage(Map.of());
 
@@ -144,8 +165,9 @@ class UserDataDumpReportDefinitionTest {
         definition.streamTo(report(), output);
 
         String[] written = Files.readAllLines(output).get(1).split(",", -1);
-        assertEquals("", written[37]);
-        assertEquals("bundle-end", written[38], "the columns after it must not shift");
+        assertEquals("", written[30], "NAS_IP_ADDRESS");
+        assertEquals("", written[37], "UTLIZED_QUOTA");
+        assertEquals("bundle-end", written[38], "the columns after them must not shift");
     }
 
     @Test
@@ -268,8 +290,12 @@ class UserDataDumpReportDefinitionTest {
         });
     }
 
-    /** Serves usage from a fixed table, in the username order the merge-join expects. */
+    /** Serves the Elasticsearch side from a fixed table, in the username order the join expects. */
     private void stubUsage(Map<String, Map<String, Long>> usageByUser) {
+        stubUsage(usageByUser, Map.of());
+    }
+
+    private void stubUsage(Map<String, Map<String, Long>> usageByUser, Map<String, String> nasByUser) {
         when(usageAggregationClient.open(any(), any(), any())).thenAnswer(invocation -> {
             String from = invocation.getArgument(1);
             shardInProgress.set(from == null ? OPEN_START : from);
@@ -286,21 +312,26 @@ class UserDataDumpReportDefinitionTest {
                     String user = iterator.next();
                     Map<String, Long> buckets = usageByUser.get(user);
                     long total = buckets.values().stream().mapToLong(Long::longValue).sum();
-                    return new UserUsage(user, buckets, total, true);
+                    return new UserUsage(user, buckets, total, true, nasByUser.get(user));
                 }
             };
         });
     }
 
-    /** A result set row: 37 directly mapped columns, the deactivation date, then the quota bucket. */
+    /**
+     * A result set row. The statement selects nothing for NAS_IP_ADDRESS — that column is filled
+     * from Elasticsearch — so the row is one column shorter than the CSV, and the username stands
+     * in for SLMN the way the statement binds it.
+     */
     private String[] databaseRow(String userName, String bandwidth, String quota, String quotaBucketId) {
         String[] values = new String[UserDumpSql.COL_QUOTA_BUCKET_ID];
         for (int i = 0; i < values.length; i++) {
             values[i] = "col" + (i + 1);
         }
         values[0] = userName;
-        values[35] = bandwidth;
-        values[36] = quota;
+        values[28] = userName;
+        values[34] = bandwidth;
+        values[35] = quota;
         values[UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE - 1] = "bundle-end";
         values[UserDumpSql.COL_QUOTA_BUCKET_ID - 1] = quotaBucketId;
         return values;

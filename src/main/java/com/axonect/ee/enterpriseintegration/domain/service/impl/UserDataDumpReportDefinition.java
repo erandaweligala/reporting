@@ -37,6 +37,11 @@ import java.util.concurrent.Executor;
  *
  * <p>Shape of the run, and why:
  *
+ * <p>NAS_IP_ADDRESS has no AAA_USER column behind it, so the dump statement selects nothing for
+ * it and the value is spliced in here from the CDR session documents cdr-service writes to
+ * Elasticsearch — out of the same per-user stream that already carries UTLIZED_QUOTA, so it costs
+ * no extra round trip. SLMN has no column either, but a stand-in worth binding: the dump
+ * statement selects the username in its place.
  */
 @Component
 @Slf4j
@@ -89,11 +94,13 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             new CsvColumn("utlized_quota", "UTLIZED_QUOTA"),
             new CsvColumn("bundle_deactivation_date", "BUNDLE_DEACTIVATION_DATE"));
 
-    /** Zero-based position of UTLIZED_QUOTA, the one column that is not read from the database. */
+    /**
+     * Zero-based positions of the two columns that are not read from the database. AAA_USER
+     * carries neither, so both are filled from the CDR session documents in Elasticsearch: the NAS
+     * the user's sessions were anchored to, and the usage drawn from the bundle's quota bucket.
+     */
+    private static final int NAS_IP_ADDRESS_POSITION = 30;
     private static final int UTILIZED_QUOTA_POSITION = 37;
-
-    /** Result set columns 1..37 land on CSV columns 1..37 unchanged. */
-    private static final int LAST_DIRECT_COLUMN = 37;
 
     private final StreamingRowReader rowReader;
     private final UsageAggregationClient usageAggregationClient;
@@ -228,17 +235,30 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         }
     }
 
+    /**
+     * Lays one result set row out over the CSV columns, splicing the two Elasticsearch-filled
+     * columns into the positions the database has no column for. Everything before NAS_IP_ADDRESS
+     * lands on its own position; everything between it and UTLIZED_QUOTA is one place to the
+     * right of its result set column, which is why the second loop indexes the row by the column
+     * number itself.
+     */
     private void writeRow(ResultSet resultSet, String[] row, UserUsageCursor usage, StreamingCsvWriter writer)
             throws Exception {
 
-        for (int column = UserDumpSql.COL_USER_ID; column <= LAST_DIRECT_COLUMN; column++) {
+        for (int column = UserDumpSql.COL_USER_ID; column <= UserDumpSql.COL_VLAN_ID; column++) {
             row[column - 1] = resultSet.getString(column);
+        }
+        for (int column = UserDumpSql.COL_NOTIFICATION_TEMPLATES; column <= UserDumpSql.COL_QUOTA; column++) {
+            row[column] = resultSet.getString(column);
         }
 
         String quotaBucketId = resultSet.getString(UserDumpSql.COL_QUOTA_BUCKET_ID);
-        Long utilized = usage.usageFor(row[0], quotaBucketId);
+        // One probe per user: the cursor hands each username out once, and both spliced columns
+        // come out of that single record.
+        UserUsageCursor.UserUsage day = usage.forUser(row[0]);
 
-        row[UTILIZED_QUOTA_POSITION] = utilized == null ? null : Long.toString(utilized);
+        row[NAS_IP_ADDRESS_POSITION] = day == null ? null : day.nasIpAddress();
+        row[UTILIZED_QUOTA_POSITION] = day == null ? null : Long.toString(day.usageOn(quotaBucketId));
         row[UTILIZED_QUOTA_POSITION + 1] = resultSet.getString(UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE);
 
         writer.writeRow(row);

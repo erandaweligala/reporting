@@ -6,33 +6,57 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * A forward-only stream of per-user daily usage, ordered by username, that a caller walking users
- * in the same order can probe without ever holding more than one user's figures.
+ * A forward-only stream of per-user daily CDR figures, ordered by username, that a caller walking
+ * users in the same order can probe without ever holding more than one user's figures.
  *
- * <p>This is the half of the dump that keeps the usage join off the heap. Materialising a day of
- * usage for 3 million users as a map would cost hundreds of megabytes and a full aggregation scan
+ * <p>This is the half of the dump that keeps the Elasticsearch join off the heap. Materialising a
+ * day for 3 million users as a map would cost hundreds of megabytes and a full aggregation scan
  * before the first CSV row could be written; instead both sides are read in username order and
  * merge-joined, so memory is bounded by one Elasticsearch page regardless of user count and the
  * two scans overlap.
+ *
+ * <p>Each user is handed out exactly once, so everything the dump takes from Elasticsearch — the
+ * day's usage and the NAS the user's sessions were anchored to — has to come out of that single
+ * probe. That is why {@link #forUser(String)} returns the whole record rather than one figure at a
+ * time: a second probe for the same username would find the stream already past it.
  */
 public abstract class UserUsageCursor implements AutoCloseable {
 
-    /** Usage for the current user, or null once the stream is exhausted. */
+    /** Figures for the current user, or null once the stream is exhausted. */
     private UserUsage head;
 
-    /** A user's usage for the day, split per bucket where the mapping allows it. */
-    public record UserUsage(String userName, Map<String, Long> perBucket, long total, boolean attributable) {
+    /**
+     * A user's day: usage split per bucket where the mapping allows it, and the NAS IP address
+     * their sessions reported.
+     *
+     * @param userName      the username the CDR documents were grouped under
+     * @param perBucket     usage per bucket id, empty when the split is not trustworthy
+     * @param total         the day's usage across every bucket
+     * @param attributable  whether {@code perBucket} may be read
+     * @param nasIpAddress  NAS the day's sessions were anchored to, null when none was recorded
+     */
+    public record UserUsage(String userName, Map<String, Long> perBucket, long total,
+                            boolean attributable, String nasIpAddress) {
+
+        /** Usage to report against {@code bucketId}, falling back to the day's total. */
+        public long usageOn(String bucketId) {
+            if (!attributable || bucketId == null || bucketId.isEmpty()) {
+                return total;
+            }
+            Long forBucket = perBucket.get(bucketId);
+            return forBucket != null ? forBucket : 0L;
+        }
     }
 
     /** Next user in username order, or null at the end of the stream. */
     protected abstract UserUsage fetchNext();
 
     /**
-     * Usage to report for {@code userName} against {@code bucketId}, or null when the user has no
-     * usage on the reported day. Callers must probe usernames in ascending UTF-8 order; a username
-     * that has already been passed cannot be revisited.
+     * The day's figures for {@code userName}, or null when the user has no session on the reported
+     * day. Callers must probe usernames in ascending UTF-8 order; a username that has already been
+     * passed cannot be revisited.
      */
-    public Long usageFor(String userName, String bucketId) {
+    public UserUsage forUser(String userName) {
         while (head == null || Utf8Order.compare(head.userName(), userName) < 0) {
             UserUsage next = fetchNext();
             if (next == null) {
@@ -49,12 +73,7 @@ public abstract class UserUsageCursor implements AutoCloseable {
         UserUsage usage = head;
         // Nothing else in the dump reads this user again, so let the page entry go.
         head = null;
-
-        if (!usage.attributable() || bucketId == null || bucketId.isEmpty()) {
-            return usage.total();
-        }
-        Long forBucket = usage.perBucket().get(bucketId);
-        return forBucket != null ? forBucket : 0L;
+        return usage;
     }
 
     @Override
@@ -62,7 +81,7 @@ public abstract class UserUsageCursor implements AutoCloseable {
         // Nothing to release by default; subclasses that hold resources override this.
     }
 
-    /** A cursor with no usage at all, used when the usage lookup is switched off. */
+    /** A cursor with no figures at all, used when the Elasticsearch lookup is switched off. */
     public static UserUsageCursor empty() {
         return new UserUsageCursor() {
             @Override

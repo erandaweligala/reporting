@@ -64,6 +64,30 @@ class UserDumpSqlTest {
                 "the quota bucket drives the usage lookup and must be selected");
         assertEquals(UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE + 1, UserDumpSql.COL_QUOTA_BUCKET_ID,
                 "the helper column follows the last CSV-mapped column");
+        assertEquals(UserDumpSql.COL_VLAN_ID + 1, UserDumpSql.COL_NOTIFICATION_TEMPLATES,
+                "the statement selects nothing for NAS_IP_ADDRESS, so the columns either side "
+                        + "of that CSV position are adjacent in the result set");
+    }
+
+    @Test
+    void reportsTheUsernameUnderSlmnBecauseTheTableHasNoSuchColumn() {
+        String sql = build(null, null).sql();
+
+        assertFalse(sql.contains("u.SLMN"), "AAA_USER has no SLMN column to select");
+        // SLMN sits between UPDATED_DATE and VLAN_ID in the agreed column order, and the username
+        // is bound into that position.
+        assertTrue(sql.contains("u.USER_NAME AS SLMN, u.VLAN_ID,"),
+                "the username must be selected again in the SLMN position");
+    }
+
+    @Test
+    void leavesTheNasIpAddressToTheElasticsearchLookup() {
+        String sql = build(null, null).sql();
+
+        assertFalse(sql.contains("NAS_IP_ADDRESS"),
+                "the NAS address comes from the CDR session documents, not from AAA_USER");
+        assertTrue(sql.contains("u.NAS_PORT_TYPE"),
+                "the similarly named NAS_PORT_TYPE column is a real one and must stay");
     }
 
     @Test
@@ -107,7 +131,10 @@ class UserDumpSqlTest {
         // TO_CHAR of a DATE with an FF element raises ORA-01821, and the dump's format carries
         // milliseconds, so every timestamp has to reach TO_CHAR as a TIMESTAMP.
         assertEquals(5, countOccurrences(sql, "AS TIMESTAMP)"));
-        for (String column : List.of("u.CREATED_DATE", "u.UPDATED_DATE", "u.CUSTOMER_ACTIVATION_DATE",
+        // CUSTOMER_ACTIVATION_DATE has no column of its own on AAA_USER either: the dump reports
+        // CREATED_DATE in that position, which is why the created date is rendered twice.
+        assertEquals(2, countOccurrences(sql, "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP)"));
+        for (String column : List.of("u.CREATED_DATE", "u.UPDATED_DATE",
                 "svc.SERVICE_START_DATE", "svc.EXPIRY_DATE")) {
             assertTrue(sql.contains("TO_CHAR(CAST(" + column + " AS TIMESTAMP), '" + DATE_FORMAT + "')"),
                     column + " must be rendered under the configured format model");

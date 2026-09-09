@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -43,12 +44,24 @@ class UsageAggregationClientTest {
     }
 
     @Test
-    void turningTheUsageLookupOffLeavesTheColumnEmptyRatherThanFailing() {
+    void turningTheLookupOffLeavesBothElasticsearchColumnsEmptyRatherThanFailing() {
         properties.getUsage().setEnabled(false);
 
         UserUsageCursor cursor = client.open(LocalDate.of(2026, 8, 22), null, null);
 
-        assertNull(cursor.usageFor("taiwowilliams", "DATA_1"));
+        assertNull(cursor.forUser("taiwowilliams"),
+                "with no cursor there is neither a UTLIZED_QUOTA nor a NAS_IP_ADDRESS to report");
+    }
+
+    @Test
+    void readsTheNasAddressBesideTheUsageInTheSameAggregation() {
+        assertTrue(UsageAggregationClient.aggregationNames().contains("nas_ip"),
+                "NAS_IP_ADDRESS must be read in the pass that already walks every user");
+        assertEquals(5, properties.getUsage().getNasAddressesPerUser(),
+                "a user who moved between NASes is still resolved to the one most of their "
+                        + "sessions used, without a per-user fetch");
+        assertEquals("nasIpAddress.keyword", properties.getUsage().getNasIpField(),
+                "the field cdr-service records the address under on the session document");
     }
 
     @Test
