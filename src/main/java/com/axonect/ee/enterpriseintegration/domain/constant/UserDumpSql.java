@@ -18,7 +18,9 @@ import java.util.List;
  *       quota bucket pivoted into columns by conditional aggregation. It joins {@code svc} so the
  *       optimizer prunes it to the shard's users instead of scanning the whole table.</li>
  *   <li>{@code mac} — AAA_USER_MAC_ADDRESS collapsed with LISTAGG, which is what produces the
- *       comma separated MAC lists the dump format expects.</li>
+ *       comma separated MAC lists the dump format expects. The rows that would take a list past
+ *       what LISTAGG can return are dropped before the aggregate sees them; see
+ *       {@link #LISTAGG_MAX_BYTES}.</li>
  * </ul>
  *
  * <p>Timestamps and numbers are converted to text by Oracle (TO_CHAR) rather than in Java. The
@@ -52,6 +54,25 @@ public final class UserDumpSql {
     public static final int COL_BUNDLE_DEACTIVATION_DATE = 37;
     /** Helper column: the bucket whose usage becomes UTLIZED_QUOTA. Not written to the CSV. */
     public static final int COL_QUOTA_BUCKET_ID = 38;
+
+    /**
+     * Bytes a LISTAGG result may reach before Oracle raises ORA-01489, and so the budget the MAC
+     * lists are truncated to.
+     *
+     * <p>Oracle has a clause for exactly this — {@code ON OVERFLOW TRUNCATE} — but it only parses
+     * on 12.2 and later. On an older server the parser reaches the {@code ON} where it expects the
+     * closing bracket of the argument list and rejects the whole statement with ORA-00907 (missing
+     * right parenthesis), which is a failed dump rather than a truncated MAC list. So the budget
+     * is spent in the inline view instead: a running total of the bytes each row would contribute
+     * decides which rows reach LISTAGG, leaving the aggregate itself in syntax every supported
+     * Oracle understands. Do not reintroduce the overflow clause without knowing the server
+     * version.
+     *
+     * <p>4000 is the limit for a VARCHAR2 under the default MAX_STRING_SIZE=STANDARD; an EXTENDED
+     * database allows more, and truncating at the smaller of the two costs nothing here — a user
+     * has a handful of MAC addresses, not two hundred.
+     */
+    private static final int LISTAGG_MAX_BYTES = 4000;
 
     private UserDumpSql() {
     }
@@ -104,16 +125,26 @@ public final class UserDumpSql {
            .append(" GROUP BY b.SERVICE_ID")
            .append("), mac AS (")
            .append(" SELECT m.USER_NAME,")
-           .append("        LISTAGG(m.MAC_ADDRESS, ',' ON OVERFLOW TRUNCATE '' WITHOUT COUNT)")
+           .append("        LISTAGG(m.MAC_ADDRESS, ',')")
            .append("            WITHIN GROUP (ORDER BY m.ID) AS MAC_ADDRESSES,")
-           .append("        LISTAGG(m.ORIGINAL_MAC_ADDRESS, ',' ON OVERFLOW TRUNCATE '' WITHOUT COUNT)")
+           .append("        LISTAGG(m.ORIGINAL_MAC_ADDRESS, ',')")
            .append("            WITHIN GROUP (ORDER BY m.ID) AS ORIGINAL_MAC_ADDRESSES")
-           .append(" FROM AAA_USER_MAC_ADDRESS m");
+           .append(" FROM (")
+           .append("   SELECT ma.USER_NAME, ma.ID, ma.MAC_ADDRESS, ma.ORIGINAL_MAC_ADDRESS,")
+           .append("          SUM(GREATEST(NVL(LENGTHB(ma.MAC_ADDRESS), 0),")
+           .append("                       NVL(LENGTHB(ma.ORIGINAL_MAC_ADDRESS), 0)) + 1)")
+           .append("              OVER (PARTITION BY ma.USER_NAME ORDER BY ma.ID")
+           .append("                    ROWS UNBOUNDED PRECEDING) AS LIST_BYTES")
+           .append("   FROM AAA_USER_MAC_ADDRESS ma");
         params.add(bandwidthBucket);
         params.add(quotaBucket);
         params.add(quotaBucket);
-        appendWhereRange(sql, params, "m.USER_NAME", usernameFrom, usernameTo);
-        sql.append(" GROUP BY m.USER_NAME)")
+        appendWhereRange(sql, params, "ma.USER_NAME", usernameFrom, usernameTo);
+        // Both lists are cut at the same row: the running total charges each row the wider of its
+        // two addresses, so neither aggregate can overflow and the two columns stay row-aligned
+        // with each other, which a per-column overflow clause would not guarantee.
+        sql.append(" ) m WHERE m.LIST_BYTES <= ").append(LISTAGG_MAX_BYTES)
+           .append(" GROUP BY m.USER_NAME)")
            .append(" SELECT u.USER_NAME, u.GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
            .append("        u.CONCURRENCY, u.CONTACT_EMAIL, u.CONTACT_NAME, u.CONTACT_NUMBER,")
            .append("        ").append(asText("u.CREATED_DATE", fmt)).append(",")

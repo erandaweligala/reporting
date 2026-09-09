@@ -104,6 +104,34 @@ class UserDumpSqlTest {
     }
 
     @Test
+    void collapsesTheMacListsWithoutSyntaxOnlyANewerOracleParses() {
+        String sql = build(null, null).sql();
+
+        // LISTAGG's own ON OVERFLOW clause is 12.2 and later. An older server reaches the ON where
+        // it expects the closing bracket and rejects the entire statement with ORA-00907, so the
+        // dump fails outright instead of truncating a MAC list.
+        assertFalse(sql.contains("ON OVERFLOW"),
+                "the overflow clause does not parse before Oracle 12.2 and fails the whole dump");
+        assertTrue(sql.contains("LISTAGG(m.MAC_ADDRESS, ',')"));
+        assertTrue(sql.contains("LISTAGG(m.ORIGINAL_MAC_ADDRESS, ',')"));
+    }
+
+    @Test
+    void dropsTheMacRowsThatWouldTakeAListPastWhatListaggCanReturn() {
+        String sql = build(null, null).sql();
+
+        // What the overflow clause used to do, done where every Oracle understands it: a running
+        // total of the bytes each row would contribute decides which rows reach the aggregate.
+        assertTrue(sql.contains("ROWS UNBOUNDED PRECEDING) AS LIST_BYTES"),
+                "the byte budget must be accumulated in the order the addresses are listed in");
+        assertTrue(sql.contains("WHERE m.LIST_BYTES <= 4000"),
+                "rows past the VARCHAR2 budget must be dropped before LISTAGG sees them");
+        // Charging each row the wider of its two addresses cuts both lists at the same row, so the
+        // MAC and original-MAC columns stay row-aligned.
+        assertTrue(sql.contains("SUM(GREATEST(NVL(LENGTHB(ma.MAC_ADDRESS), 0),"));
+    }
+
+    @Test
     void ordersByUsernameSoTheUsageStreamCanBeMergedIn() {
         assertTrue(build(null, null).sql().trim().endsWith("ORDER BY u.USER_NAME"));
     }

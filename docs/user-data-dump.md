@@ -9,7 +9,7 @@ make it survive that row count, and the settings an operator needs.
 | Columns | Source |
 | --- | --- |
 | `USER_ID`, and every column not listed below | `AAA_USER` |
-| `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, comma-joined per user with `LISTAGG` |
+| `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, comma-joined per user with `LISTAGG` (see below) |
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
 | `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
@@ -58,6 +58,18 @@ dump statement as pre-aggregated inline views (`UserDumpSql`). Fetching them per
 three round trips per row — around nine million on a three million row dump. Each view collapses
 its table in one pass and is hash-joined; the bucket view is joined to the bundle view so the
 optimizer prunes it to the shard's own services rather than scanning `BUCKET_INSTANCE` whole.
+
+**MAC lists truncated, not overflowed.** `LISTAGG` returns a `VARCHAR2`, so a user with enough
+MAC addresses to push the joined list past 4 000 bytes would raise ORA-01489 and fail the run.
+Oracle has a clause for exactly that — `ON OVERFLOW TRUNCATE` — but it only parses on 12.2 and
+later: an older server reaches the `ON` where it expects the closing bracket of the argument list
+and rejects the whole statement with **ORA-00907 (missing right parenthesis)**, which is a failed
+dump rather than a shortened MAC list. So `UserDumpSql` spends the byte budget itself, in the
+inline view: a running total charges each row the wider of its two addresses, rows past 4 000 bytes
+never reach the aggregate, and `LISTAGG` is left in syntax every supported Oracle understands.
+Cutting both lists at the same row also keeps `MAC_ADDRESS` and `ORIGINAL_MAC_ADDRESS`
+row-aligned, which a per-column overflow clause would not. Do not put the overflow clause back
+without first establishing the server version.
 
 **One cursor, not pages.** Rows stream off an open, read-only, forward-only JDBC cursor with a
 5 000 row fetch size (`StreamingRowReader`). Offset pagination — what the paged report framework
