@@ -209,6 +209,8 @@ report:
       index: radius-sessions     # cdr-service `sessions-data`; the D-1 index is derived from it
       page-size: 2000            # usernames per composite aggregation page
       buckets-per-user: 20
+      nas-addresses-per-user: 5  # distinct NAS addresses weighed before NAS_IP_ADDRESS is picked
+      nas-ip-field: nasIpAddress.keyword
       nested: true               # sessionInstances is mapped as a nested type
       instances-path: sessionInstances
 

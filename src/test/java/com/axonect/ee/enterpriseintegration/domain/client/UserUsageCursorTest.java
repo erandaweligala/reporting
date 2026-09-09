@@ -24,8 +24,18 @@ class UserUsageCursorTest {
     }
 
     private static UserUsageCursor.UserUsage attributed(String user, Map<String, Long> buckets) {
+        return attributed(user, buckets, "10.20.30.40");
+    }
+
+    private static UserUsageCursor.UserUsage attributed(String user, Map<String, Long> buckets, String nasIp) {
         long total = buckets.values().stream().mapToLong(Long::longValue).sum();
-        return new UserUsageCursor.UserUsage(user, buckets, total, true);
+        return new UserUsageCursor.UserUsage(user, buckets, total, true, nasIp);
+    }
+
+    /** Usage the cursor reports for one user against one bucket, or null when it has no day. */
+    private static Long usageFor(UserUsageCursor cursor, String user, String bucketId) {
+        UserUsageCursor.UserUsage day = cursor.forUser(user);
+        return day == null ? null : day.usageOn(bucketId);
     }
 
     @Test
@@ -33,7 +43,26 @@ class UserUsageCursorTest {
         UserUsageCursor cursor = cursorOver(List.of(
                 attributed("alice", Map.of("DATA_1", 100L, "NIGHT_1", 5L))));
 
-        assertEquals(100L, cursor.usageFor("alice", "DATA_1"));
+        assertEquals(100L, usageFor(cursor, "alice", "DATA_1"));
+    }
+
+    @Test
+    void carriesTheNasAddressTheDumpHasNoDatabaseColumnFor() {
+        UserUsageCursor cursor = cursorOver(List.of(
+                attributed("alice", Map.of("DATA_1", 100L), "10.20.30.40")));
+
+        UserUsageCursor.UserUsage day = cursor.forUser("alice");
+
+        assertEquals("10.20.30.40", day.nasIpAddress());
+        assertEquals(100L, day.usageOn("DATA_1"), "one probe must serve both spliced columns");
+    }
+
+    @Test
+    void aUserWhoseSessionsReportedNoNasAddressCarriesNone() {
+        UserUsageCursor cursor = cursorOver(List.of(
+                attributed("alice", Map.of("DATA_1", 100L), null)));
+
+        assertNull(cursor.forUser("alice").nasIpAddress());
     }
 
     @Test
@@ -44,38 +73,38 @@ class UserUsageCursorTest {
                 attributed("carol", Map.of("DATA_1", 3L))));
 
         // The dump walks users in the same order but has no row for bob.
-        assertEquals(1L, cursor.usageFor("alice", "DATA_1"));
-        assertEquals(3L, cursor.usageFor("carol", "DATA_1"));
+        assertEquals(1L, usageFor(cursor, "alice", "DATA_1"));
+        assertEquals(3L, usageFor(cursor, "carol", "DATA_1"));
     }
 
     @Test
     void usersWithNoSessionsThatDayReportNothing() {
         UserUsageCursor cursor = cursorOver(List.of(attributed("carol", Map.of("DATA_1", 3L))));
 
-        assertNull(cursor.usageFor("alice", "DATA_1"), "alice has no usage document at all");
-        assertEquals(3L, cursor.usageFor("carol", "DATA_1"));
+        assertNull(cursor.forUser("alice"), "alice has no usage document at all");
+        assertEquals(3L, usageFor(cursor, "carol", "DATA_1"));
     }
 
     @Test
     void aUserWithUsageOnOtherBucketsOnlyReportsZeroForTheQuotaBucket() {
         UserUsageCursor cursor = cursorOver(List.of(attributed("alice", Map.of("VOICE_1", 900L))));
 
-        assertEquals(0L, cursor.usageFor("alice", "DATA_1"));
+        assertEquals(0L, usageFor(cursor, "alice", "DATA_1"));
     }
 
     @Test
     void fallsBackToTheDailyTotalWhenTheBundleHasNoQuotaBucket() {
         UserUsageCursor cursor = cursorOver(List.of(attributed("alice", Map.of("DATA_1", 7L, "DATA_2", 3L))));
 
-        assertEquals(10L, cursor.usageFor("alice", null));
+        assertEquals(10L, usageFor(cursor, "alice", null));
     }
 
     @Test
     void reportsTheDailyTotalWhenUsageCouldNotBeSplitPerBucket() {
         UserUsageCursor cursor = cursorOver(List.of(
-                new UserUsageCursor.UserUsage("alice", Map.of(), 42L, false)));
+                new UserUsageCursor.UserUsage("alice", Map.of(), 42L, false, "10.20.30.40")));
 
-        assertEquals(42L, cursor.usageFor("alice", "DATA_1"),
+        assertEquals(42L, usageFor(cursor, "alice", "DATA_1"),
                 "without a nested mapping the bucket split is not trustworthy, so the day is reported whole");
     }
 
@@ -83,13 +112,13 @@ class UserUsageCursorTest {
     void keepsReportingNothingOnceTheStreamRunsOut() {
         UserUsageCursor cursor = cursorOver(List.of(attributed("alice", Map.of("DATA_1", 1L))));
 
-        assertEquals(1L, cursor.usageFor("alice", "DATA_1"));
-        assertNull(cursor.usageFor("bob", "DATA_1"));
-        assertNull(cursor.usageFor("carol", "DATA_1"));
+        assertEquals(1L, usageFor(cursor, "alice", "DATA_1"));
+        assertNull(cursor.forUser("bob"));
+        assertNull(cursor.forUser("carol"));
     }
 
     @Test
     void theEmptyCursorNeverMatches() {
-        assertNull(UserUsageCursor.empty().usageFor("alice", "DATA_1"));
+        assertNull(UserUsageCursor.empty().forUser("alice"));
     }
 }

@@ -12,10 +12,24 @@ make it survive that row count, and the settings an operator needs.
 | `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, comma-joined per user with `LISTAGG` |
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
 | `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
+| `SLMN` | the username — `AAA_USER` has no `SLMN` column |
+| `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
 | `UTLIZED_QUOTA` | Elasticsearch: the user's D-1 usage on the bundle's quota bucket |
+| `CUSTOMER_ACTIVATION_DATE` | `AAA_USER.CREATED_DATE` — there is no separate activation column |
 
 Column order is part of the contract with the consuming system and is asserted in
 `UserDataDumpReportDefinitionTest`. `UTLIZED_QUOTA` is spelled the way the consumer spells it.
+
+Three of those columns have no `AAA_USER` column of that name behind them. Two are stand-ins the
+dump statement binds in the column's place: `SLMN` carries the username, and
+`CUSTOMER_ACTIVATION_DATE` the created date. `NAS_IP_ADDRESS` has no stand-in worth binding — it
+is the `nasIpAddress` cdr-service records on the session document from the CDR every accounting
+event carries, so the statement selects nothing in that position and
+`UserDataDumpReportDefinition` splices the value in as it lays the row out, from the same
+Elasticsearch pass that already produces `UTLIZED_QUOTA` rather than from a lookup of its own. A
+user whose sessions named more than one NAS that day is reported under the one most of them used;
+a user with no session that day gets an empty column, exactly as they get an empty
+`UTLIZED_QUOTA`.
 
 Two more parts of that contract are fixed by the sample extract rather than by our own taste. Every
 timestamp is written as `yyyy-MM-dd HH:mm:ss.SSS` — the `date-format` below is the Oracle model that
@@ -54,8 +68,8 @@ the size of the report.
 the reader pulls every column with `getString`. At three million rows the `Timestamp` and
 `BigDecimal` objects a typed read would allocate, not the I/O, are what drives the collector.
 
-**Usage merge-joined, not looked up.** Both sides are read in username order and consumed in step
-(`UserUsageCursor`). Per-user lookups would be three million Elasticsearch round trips; a
+**Elasticsearch merge-joined, not looked up.** Both sides are read in username order and consumed
+in step (`UserUsageCursor`). Per-user lookups would be three million Elasticsearch round trips; a
 pre-built map would cost a full aggregation scan and hundreds of megabytes before the first row
 could be written. Instead nothing is held except the row being written and the aggregation page
 being drained, so heap use is flat regardless of user count and the two scans overlap. Usage comes
@@ -141,9 +155,14 @@ report:
       index: radius-sessions     # cdr-service `sessions-data`
       page-size: 2000
       buckets-per-user: 20
+      nas-addresses-per-user: 5  # distinct NAS addresses weighed before NAS_IP_ADDRESS is picked
+      nas-ip-field: nasIpAddress.keyword
       nested: true
       instances-path: sessionInstances
 ```
+
+`usage.enabled: false` leaves both Elasticsearch-filled columns — `UTLIZED_QUOTA` and
+`NAS_IP_ADDRESS` — empty rather than failing the run.
 
 `usage.nested` must describe how `sessionInstances` is actually mapped. Mapped as `nested`, usage
 can be summed per bucket. Mapped as a plain object, Elasticsearch flattens the array and a
@@ -174,6 +193,14 @@ starting point, not a maximum.
 - `BUNDLE_ACTIVATION_DATE` is `SERVICE_INSTANCE.SERVICE_START_DATE` and `BUNDLE_DEACTIVATION_DATE`
   is `EXPIRY_DATE`; where a user has held several bundles, the one active on D-1 is reported, most
   recent first.
+- `AAA_USER` has no `SLMN`, `NAS_IP_ADDRESS` or `CUSTOMER_ACTIVATION_DATE` column, which is why
+  those three are filled as described at the top. If a column for any of them is added later,
+  selecting it is a one-line change in `UserDumpSql` — plus, for `NAS_IP_ADDRESS`, the column
+  positions in `UserDataDumpReportDefinition`, since that one shifts the result set.
+- The CDR session documents carry `nasIpAddress` with a `keyword` sub-field, the same shape the
+  usage join already assumes of `userName`. An aggregation on a field the mapping does not have
+  returns no terms rather than an error, so a wrong guess here shows up as an empty column and not
+  as a failed run — `usage.nas-ip-field` is the knob that fixes it without a rebuild.
 
 ## Indexes the dump relies on
 

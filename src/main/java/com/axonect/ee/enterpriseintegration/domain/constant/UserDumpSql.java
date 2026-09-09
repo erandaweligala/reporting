@@ -26,6 +26,14 @@ import java.util.List;
  * Timestamp/BigDecimal allocations — at 3 million rows those allocations, not the I/O, are what
  * drives the collector.
  *
+ * <p>Not every column of the dump has a column of that name on AAA_USER. SLMN has none, so the
+ * username is selected in its place — the consuming system keys on it, so it is bound rather than
+ * left empty; CUSTOMER_ACTIVATION_DATE is likewise reported as CREATED_DATE. NAS_IP_ADDRESS has
+ * none either, and no stand-in worth binding: it lives on the CDR session documents cdr-service
+ * writes to Elasticsearch, so the result set carries nothing in that position and
+ * {@code UserDataDumpReportDefinition} splices the value in from the same per-user stream that
+ * already produces UTLIZED_QUOTA.
+ *
  * <p>The username range predicates are what let the dump be sharded: each shard scans a disjoint
  * slice of the username keyspace and the same slice is pushed into the Elasticsearch aggregation,
  * so both sides of the usage join stay aligned.
@@ -34,10 +42,16 @@ public final class UserDumpSql {
 
     /** Column positions in the result set produced by {@link #build}. */
     public static final int COL_USER_ID = 1;
+    /** Last column before the NAS_IP_ADDRESS slot Elasticsearch fills (VLAN_ID). */
+    public static final int COL_VLAN_ID = 30;
+    /** First column after that slot (NOTIFICATION_TEMPLATES). */
+    public static final int COL_NOTIFICATION_TEMPLATES = 31;
+    /** Last column before the UTLIZED_QUOTA slot Elasticsearch fills (QUOTA). */
+    public static final int COL_QUOTA = 36;
     /** Last column that maps straight onto a CSV column (BUNDLE_DEACTIVATION_DATE). */
-    public static final int COL_BUNDLE_DEACTIVATION_DATE = 38;
+    public static final int COL_BUNDLE_DEACTIVATION_DATE = 37;
     /** Helper column: the bucket whose usage becomes UTLIZED_QUOTA. Not written to the CSV. */
-    public static final int COL_QUOTA_BUCKET_ID = 39;
+    public static final int COL_QUOTA_BUCKET_ID = 38;
 
     private UserDumpSql() {
     }
@@ -108,7 +122,10 @@ public final class UserDumpSql {
            .append("        u.NAS_PORT_TYPE, mac.ORIGINAL_MAC_ADDRESSES, u.REMOTE_ID, u.REQUEST_ID,")
            .append("        u.SESSION_TIMEOUT, u.STATUS, u.SUBSCRIPTION,")
            .append("        ").append(asText("u.UPDATED_DATE", fmt)).append(",")
-           .append("        u.SLMN, u.VLAN_ID, u.NAS_IP_ADDRESS, u.NOTIFICATION_TEMPLATES,")
+           // AAA_USER carries no SLMN column, so the dump reports the username under it; and no
+           // NAS_IP_ADDRESS either — that one is filled from the CDR session documents in
+           // Elasticsearch, so nothing is selected for it here.
+           .append("        u.USER_NAME AS SLMN, u.VLAN_ID, u.NOTIFICATION_TEMPLATES,")
            .append("        ").append(asText("u.CREATED_DATE", fmt)).append(",")
            .append("        ").append(asText("svc.SERVICE_START_DATE", fmt)).append(",")
            .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")

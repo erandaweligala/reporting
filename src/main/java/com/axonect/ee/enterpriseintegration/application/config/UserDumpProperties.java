@@ -58,7 +58,7 @@ public class UserDumpProperties {
     /** BUCKET_INSTANCE.BUCKET_TYPE that carries the data quota. */
     private String quotaBucketType = "DATA";
 
-    /** Usage lookup against Elasticsearch. */
+    /** Per-user lookup against the CDR session documents in Elasticsearch. */
     private Usage usage = new Usage();
 
     @Data
@@ -74,6 +74,23 @@ public class UserDumpProperties {
         private int bucketsPerUser = 20;
 
         /**
+         * Distinct NAS addresses considered for a single user in a day. NAS_IP_ADDRESS reports the
+         * one most of the user's sessions were anchored to, so the default only has to be wide
+         * enough to see past a user who moved between NASes; the whole point of keeping it small is
+         * that the terms aggregation stays a doc-values read rather than a per-user fetch.
+         */
+        private int nasAddressesPerUser = 5;
+
+        /**
+         * Field NAS_IP_ADDRESS is aggregated on. The usage join has always assumed
+         * {@code userName.keyword} and is proven against the live indices; this field is newer, and
+         * an aggregation on a field the mapping does not have returns no terms rather than an
+         * error — an empty column, not a failed run. Overriding it is the fix if cdr-service's
+         * template ever maps the address as a plain keyword instead of a sub-field.
+         */
+        private String nasIpField = "nasIpAddress.keyword";
+
+        /**
          * Whether sessionInstances is mapped as a nested type. When it is, usage can be summed
          * per bucket; when it is not, Elasticsearch flattens the array and a per-bucket sum would
          * silently attribute every instance's usage to every bucket the session touched, so the
@@ -84,7 +101,10 @@ public class UserDumpProperties {
         /** Path of the session instance array inside the CDR session document. */
         private String instancesPath = "sessionInstances";
 
-        /** Set false to emit an empty UTLIZED_QUOTA instead of querying Elasticsearch. */
+        /**
+         * Set false to emit an empty UTLIZED_QUOTA and NAS_IP_ADDRESS instead of querying
+         * Elasticsearch.
+         */
         private boolean enabled = true;
     }
 }
