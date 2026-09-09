@@ -15,6 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
+import java.util.Locale;
 
 
 @RestController
@@ -22,6 +23,10 @@ import java.io.IOException;
 @Slf4j
 
 public class DownloadReportController{
+
+    private static final String CSV_CONTENT_TYPE = "text/csv";
+    private static final String SPREADSHEET_CONTENT_TYPE =
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
     private  final DownloadReportServiceImpl downloadReportService;
 
@@ -49,7 +54,7 @@ public class DownloadReportController{
 
         ResponseEntity.BodyBuilder responseBuilder = ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
-                .contentType(MediaType.parseMediaType("text/csv"));
+                .contentType(contentTypeOf(filename));
 
         long contentLength = reportResource.contentLength();
         if (contentLength >= 0) {
@@ -57,6 +62,18 @@ public class DownloadReportController{
         }
 
         return responseBuilder.body(reportResource);
+    }
+
+    /**
+     * The media type is taken from the file the report was written as, not assumed: the same
+     * endpoint serves a CSV dump and a spreadsheet, and a browser handed an {@code .xlsx} under
+     * {@code text/csv} will try to display it rather than save it.
+     */
+    private MediaType contentTypeOf(String filename) {
+        if (filename != null && filename.toLowerCase(Locale.ROOT).endsWith(".xlsx")) {
+            return MediaType.parseMediaType(SPREADSHEET_CONTENT_TYPE);
+        }
+        return MediaType.parseMediaType(CSV_CONTENT_TYPE);
     }
 
 }

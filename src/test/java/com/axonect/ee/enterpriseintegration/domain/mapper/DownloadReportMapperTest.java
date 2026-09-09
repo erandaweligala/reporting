@@ -6,6 +6,8 @@ import com.axonect.ee.enterpriseintegration.application.util.exception.type.Base
 import com.axonect.ee.enterpriseintegration.application.util.resultenum.ResponseCodeEnum;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReportRequest;
+import com.axonect.ee.enterpriseintegration.domain.service.StreamingReportDefinition;
+import com.axonect.ee.enterpriseintegration.domain.util.ReportDefinitionsRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
@@ -37,6 +39,9 @@ class DownloadReportMapperTest {
 
     @Mock
     private Query query;
+
+    /** Registered on demand; the registry is static, so it carries a name no other test uses. */
+    private static final String STREAMING_REPORT_TYPE = "MAPPER_TEST_STREAMING_REPORT";
 
     private DownloadReportRequest downloadReportRequest;
 
@@ -103,8 +108,41 @@ class DownloadReportMapperTest {
     }
 
     @Test
-    @DisplayName("mapDownloadRequestToEntity: format should always be EXCEL")
-    void mapDownloadRequestToEntity_formatIsAlwaysExcel() throws JsonProcessingException, BaseException {
+    @DisplayName("mapDownloadRequestToEntity: format defaults to EXCEL for a paged report type")
+    void mapDownloadRequestToEntity_formatDefaultsToExcel() throws JsonProcessingException, BaseException {
+
+        DownloadReport result = downloadReportMapper.mapDownloadRequestToEntity(downloadReportRequest);
+
+        assertThat(result.getFormat()).isEqualTo(AppConstant.EXCEL);
+    }
+
+    @Test
+    @DisplayName("mapDownloadRequestToEntity: an explicitly requested format is honoured, normalised to upper case")
+    void mapDownloadRequestToEntity_requestedFormatIsHonoured() throws JsonProcessingException, BaseException {
+        downloadReportRequest.setFormat(" csv ");
+
+        DownloadReport result = downloadReportMapper.mapDownloadRequestToEntity(downloadReportRequest);
+
+        assertThat(result.getFormat()).isEqualTo(AppConstant.CSV);
+    }
+
+    @Test
+    @DisplayName("mapDownloadRequestToEntity: a streaming report type defaults to CSV, the only format it can produce")
+    void mapDownloadRequestToEntity_streamingReportDefaultsToCsv() throws JsonProcessingException, BaseException {
+        ReportDefinitionsRegistry.register(STREAMING_REPORT_TYPE, mock(StreamingReportDefinition.class));
+        downloadReportRequest.setReportType(STREAMING_REPORT_TYPE);
+
+        DownloadReport result = downloadReportMapper.mapDownloadRequestToEntity(downloadReportRequest);
+
+        assertThat(result.getFormat()).isEqualTo(AppConstant.CSV);
+    }
+
+    @Test
+    @DisplayName("mapDownloadRequestToEntity: an explicit EXCEL on a streaming type is left for the pipeline to reject")
+    void mapDownloadRequestToEntity_streamingReportKeepsExplicitExcel() throws JsonProcessingException, BaseException {
+        ReportDefinitionsRegistry.register(STREAMING_REPORT_TYPE, mock(StreamingReportDefinition.class));
+        downloadReportRequest.setReportType(STREAMING_REPORT_TYPE);
+        downloadReportRequest.setFormat(AppConstant.EXCEL);
 
         DownloadReport result = downloadReportMapper.mapDownloadRequestToEntity(downloadReportRequest);
 
