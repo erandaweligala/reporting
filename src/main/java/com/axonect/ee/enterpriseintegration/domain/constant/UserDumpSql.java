@@ -7,9 +7,9 @@ import java.util.List;
  * The single Oracle statement behind the USER_DATA_DUMP report.
  *
  * <p>Every column of the dump that lives in the database is produced by this one statement, so a
- * ~3 million row dump costs one cursor rather than one query per user. The three satellite tables
- * are folded in as pre-aggregated inline views, each of which Oracle can hash-join in a single
- * pass:
+ * ~3 million row dump costs one cursor rather than one query per user. Two of the three satellite
+ * tables are folded in as pre-aggregated inline views, each of which Oracle can hash-join in a
+ * single pass:
  *
  * <ul>
  *   <li>{@code svc} — the SERVICE_INSTANCE that was active on the reported day, one row per user,
@@ -17,11 +17,15 @@ import java.util.List;
  *   <li>{@code bkt} — BUCKET_INSTANCE collapsed to one row per service with the bandwidth and the
  *       quota bucket pivoted into columns by conditional aggregation. It joins {@code svc} so the
  *       optimizer prunes it to the shard's users instead of scanning the whole table.</li>
- *   <li>{@code mac} — AAA_USER_MAC_ADDRESS collapsed with LISTAGG, which is what produces the
- *       comma separated MAC lists the dump format expects. The rows that would take a list past
- *       what LISTAGG can return are dropped before the aggregate sees them; see
- *       {@link #LISTAGG_MAX_BYTES}.</li>
  * </ul>
+ *
+ * <p>The MAC addresses are the one satellite table that is <em>not</em> folded into an aggregate.
+ * AAA_USER_MAC_ADDRESS is joined row for row and the cursor therefore hands out one row per MAC
+ * address a user holds, in {@code (username, id)} order; the comma separated lists the dump format
+ * expects are joined up by {@code UserDataDumpReportDefinition} as it walks those rows. Collapsing
+ * them here instead would mean LISTAGG, and LISTAGG is what the server this dump runs against
+ * rejects — see {@link #build} — so the aggregate is spent where no Oracle version has an opinion
+ * about it.
  *
  * <p>Timestamps and numbers are converted to text by Oracle (TO_CHAR) rather than in Java. The
  * reader can then pull every column with {@code getString}, which keeps the row pipeline free of
@@ -55,30 +59,23 @@ public final class UserDumpSql {
     /** Helper column: the bucket whose usage becomes UTLIZED_QUOTA. Not written to the CSV. */
     public static final int COL_QUOTA_BUCKET_ID = 38;
 
-    /**
-     * Bytes a LISTAGG result may reach before Oracle raises ORA-01489, and so the budget the MAC
-     * lists are truncated to.
-     *
-     * <p>Oracle has a clause for exactly this — {@code ON OVERFLOW TRUNCATE} — but it only parses
-     * on 12.2 and later. On an older server the parser reaches the {@code ON} where it expects the
-     * closing bracket of the argument list and rejects the whole statement with ORA-00907 (missing
-     * right parenthesis), which is a failed dump rather than a truncated MAC list. So the budget
-     * is spent in the inline view instead: a running total of the bytes each row would contribute
-     * decides which rows reach LISTAGG, leaving the aggregate itself in syntax every supported
-     * Oracle understands. Do not reintroduce the overflow clause without knowing the server
-     * version.
-     *
-     * <p>4000 is the limit for a VARCHAR2 under the default MAX_STRING_SIZE=STANDARD; an EXTENDED
-     * database allows more, and truncating at the smaller of the two costs nothing here — a user
-     * has a handful of MAC addresses, not two hundred.
-     */
-    private static final int LISTAGG_MAX_BYTES = 4000;
-
     private UserDumpSql() {
     }
 
     /**
      * Builds the dump statement for one shard.
+     *
+     * <p>Everything here parses on any Oracle from 9i onwards — subquery factoring, ROW_NUMBER,
+     * conditional aggregation, ANSI outer joins, TO_CHAR. That is deliberate, and it is why the
+     * MAC addresses are joined row for row instead of being collapsed with LISTAGG: this dump
+     * failed every run with ORA-00907 (missing right parenthesis) while it used LISTAGG, first
+     * with the 12.2-only {@code ON OVERFLOW TRUNCATE} clause and then, once that was removed,
+     * with the plain {@code LISTAGG(...) WITHIN GROUP (...)} the removal left behind. A server
+     * whose parser does not know LISTAGG reaches the WITHIN where it expects the subquery's
+     * closing bracket and rejects the whole statement with exactly that error — the same failure
+     * the overflow clause produced, which is why removing only the clause changed nothing.
+     * Nothing left in this statement is newer than the parser that rejected it. Keep it that way:
+     * a construct that needs a particular server version fails the entire dump, not one column.
      *
      * @param usernameFrom    inclusive lower bound of the shard's username range, null for open
      * @param usernameTo      exclusive upper bound of the shard's username range, null for open
@@ -123,34 +120,17 @@ public final class UserDumpSql {
            .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS QUOTA_BUCKET_ID")
            .append(" FROM BUCKET_INSTANCE b JOIN svc ON svc.ID = b.SERVICE_ID")
            .append(" GROUP BY b.SERVICE_ID")
-           .append("), mac AS (")
-           .append(" SELECT m.USER_NAME,")
-           .append("        LISTAGG(m.MAC_ADDRESS, ',')")
-           .append("            WITHIN GROUP (ORDER BY m.ID) AS MAC_ADDRESSES,")
-           .append("        LISTAGG(m.ORIGINAL_MAC_ADDRESS, ',')")
-           .append("            WITHIN GROUP (ORDER BY m.ID) AS ORIGINAL_MAC_ADDRESSES")
-           .append(" FROM (")
-           .append("   SELECT ma.USER_NAME, ma.ID, ma.MAC_ADDRESS, ma.ORIGINAL_MAC_ADDRESS,")
-           .append("          SUM(GREATEST(NVL(LENGTHB(ma.MAC_ADDRESS), 0),")
-           .append("                       NVL(LENGTHB(ma.ORIGINAL_MAC_ADDRESS), 0)) + 1)")
-           .append("              OVER (PARTITION BY ma.USER_NAME ORDER BY ma.ID")
-           .append("                    ROWS UNBOUNDED PRECEDING) AS LIST_BYTES")
-           .append("   FROM AAA_USER_MAC_ADDRESS ma");
+           .append(")");
         params.add(bandwidthBucket);
         params.add(quotaBucket);
         params.add(quotaBucket);
-        appendWhereRange(sql, params, "ma.USER_NAME", usernameFrom, usernameTo);
-        // Both lists are cut at the same row: the running total charges each row the wider of its
-        // two addresses, so neither aggregate can overflow and the two columns stay row-aligned
-        // with each other, which a per-column overflow clause would not guarantee.
-        sql.append(" ) m WHERE m.LIST_BYTES <= ").append(LISTAGG_MAX_BYTES)
-           .append(" GROUP BY m.USER_NAME)")
-           .append(" SELECT u.USER_NAME, u.GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
+
+        sql.append(" SELECT u.USER_NAME, u.GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
            .append("        u.CONCURRENCY, u.CONTACT_EMAIL, u.CONTACT_NAME, u.CONTACT_NUMBER,")
            .append("        ").append(asText("u.CREATED_DATE", fmt)).append(",")
            .append("        u.CUSTOM_TIMEOUT, u.CYCLE_DATE, u.ENCRYPTION_METHOD, u.GROUP_ID, u.IDLE_TIMEOUT,")
-           .append("        u.IP_ALLOCATION, u.IP_POOL_NAME, u.IPV4, u.IPV6, mac.MAC_ADDRESSES,")
-           .append("        u.NAS_PORT_TYPE, mac.ORIGINAL_MAC_ADDRESSES, u.REMOTE_ID, u.REQUEST_ID,")
+           .append("        u.IP_ALLOCATION, u.IP_POOL_NAME, u.IPV4, u.IPV6, mac.MAC_ADDRESS,")
+           .append("        u.NAS_PORT_TYPE, mac.ORIGINAL_MAC_ADDRESS, u.REMOTE_ID, u.REQUEST_ID,")
            .append("        u.SESSION_TIMEOUT, u.STATUS, u.SUBSCRIPTION,")
            .append("        ").append(asText("u.UPDATED_DATE", fmt)).append(",")
            // AAA_USER carries no SLMN column, so the dump reports the username under it; and no
@@ -165,11 +145,18 @@ public final class UserDumpSql {
            .append(" FROM AAA_USER u")
            .append(" LEFT JOIN svc ON svc.USERNAME = u.USER_NAME")
            .append(" LEFT JOIN bkt ON bkt.SERVICE_ID = svc.ID")
-           .append(" LEFT JOIN mac ON mac.USER_NAME = u.USER_NAME");
+           // One row per MAC address rather than a list: see the note on the class. The shard
+           // bounds are repeated inside the join condition rather than added to the WHERE clause,
+           // where they would turn the outer join into an inner one and drop every user who holds
+           // no MAC address at all.
+           .append(" LEFT JOIN AAA_USER_MAC_ADDRESS mac ON mac.USER_NAME = u.USER_NAME");
+        appendRange(sql, params, "mac.USER_NAME", usernameFrom, usernameTo);
         appendWhereRange(sql, params, "u.USER_NAME", usernameFrom, usernameTo);
         // Binary order, matching the order the Elasticsearch composite aggregation returns
-        // usernames in, so the two streams can be merge-joined without buffering either side.
-        sql.append(" ORDER BY u.USER_NAME");
+        // usernames in, so the two streams can be merge-joined without buffering either side. The
+        // id breaks the tie between a user's own rows, which is the order their MAC addresses are
+        // listed in.
+        sql.append(" ORDER BY u.USER_NAME, mac.ID");
 
         return new SqlStatement(sql.toString(), params);
     }

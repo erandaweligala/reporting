@@ -84,7 +84,7 @@ public class StreamingRowReader {
                 bind(ps, statement.params());
 
                 long rows = 0;
-                try (ResultSet rs = ps.executeQuery()) {
+                try (ResultSet rs = openCursor(ps, statement)) {
                     rs.setFetchSize(fetchSize);
                     while (rs.next()) {
                         handler.handle(rs);
@@ -97,6 +97,25 @@ public class StreamingRowReader {
                 // opened still has to be closed out before the connection returns to the pool.
                 rollbackQuietly(connection);
             }
+        }
+    }
+
+    /**
+     * Opens the cursor, putting the statement itself in the log if the database will not take it.
+     *
+     * <p>A report statement is assembled rather than written out, so an ORA-00907 or an ORA-00904
+     * off one of these is otherwise unattributable: the exception names the complaint and nothing
+     * about the text that provoked it, and the statement cannot be recovered from the logs to be
+     * run by hand. The bound values are deliberately left out — the statement is the part that is
+     * rejected, and the values are subscriber data.
+     */
+    private ResultSet openCursor(PreparedStatement ps, SqlStatement statement) throws SQLException {
+        try {
+            return ps.executeQuery();
+        } catch (SQLException e) {
+            log.error("The database rejected this report statement ({}): {}",
+                    e.getMessage(), statement.sql());
+            throw e;
         }
     }
 

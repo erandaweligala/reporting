@@ -126,6 +126,122 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
+    void joinsUpTheMacAddressesTheCursorHandsOutOneRowAtATime() throws Exception {
+        // The statement joins AAA_USER_MAC_ADDRESS row for row, so a user with three addresses
+        // arrives as three rows that differ only in those two columns.
+        stubReader(List.of(
+                macRow("taiwowilliams", "AA:AA", "BB:AA"),
+                macRow("taiwowilliams", "AA:BB", "BB:BB"),
+                macRow("taiwowilliams", "AA:CC", "BB:CC")));
+        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 42L)), Map.of("taiwowilliams", "10.0.0.1"));
+
+        Path output = outputWithHeader("macs.csv");
+        long rows = definition.streamTo(report(), output);
+
+        assertEquals(1, rows, "the three rows are one user, and the dump is one row per user");
+        List<String> lines = Files.readAllLines(output);
+        assertEquals(2, lines.size(), "header plus the single collapsed row");
+
+        // The joined lists carry commas, so the row has to be read back as CSV rather than split.
+        List<String> written = fields(lines.get(1));
+        assertEquals(39, written.size());
+        assertEquals("AA:AA,AA:BB,AA:CC", written.get(19), "MAC_ADDRESS");
+        assertEquals("BB:AA,BB:BB,BB:CC", written.get(21), "ORIGINAL_MAC_ADDRESS");
+        assertEquals("10.0.0.1", written.get(30), "the columns after the lists must not shift");
+        assertEquals("42", written.get(37), "UTLIZED_QUOTA");
+    }
+
+    @Test
+    void probesElasticsearchOncePerUserRatherThanOncePerMacAddress() throws Exception {
+        // The usage cursor hands each username out exactly once; a second probe for a user it has
+        // already passed would come back empty and blank the two spliced columns.
+        stubReader(List.of(
+                macRow("firstuser", "AA:AA", "BB:AA"),
+                macRow("firstuser", "AA:BB", "BB:BB"),
+                macRow("seconduser", "CC:CC", "DD:DD")));
+        stubUsage(Map.of("firstuser", Map.of("DATA_1", 11L), "seconduser", Map.of("DATA_1", 22L)));
+
+        Path output = outputWithHeader("probes.csv");
+        assertEquals(2, definition.streamTo(report(), output));
+
+        List<String> lines = Files.readAllLines(output);
+        assertEquals("11", fields(lines.get(1)).get(37));
+        assertEquals("22", fields(lines.get(2)).get(37));
+    }
+
+    @Test
+    void aUserHoldingNoMacAddressStillGetsARowWithBothColumnsEmpty() throws Exception {
+        // The outer join gives such a user a single row with both MAC columns null.
+        stubReader(List.<String[]>of(macRow("nomacuser", null, null)));
+        stubUsage(Map.of());
+
+        Path output = outputWithHeader("no-mac.csv");
+        assertEquals(1, definition.streamTo(report(), output));
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals(39, written.length);
+        assertEquals("nomacuser", written[0]);
+        assertEquals("", written[19], "MAC_ADDRESS");
+        assertEquals("", written[21], "ORIGINAL_MAC_ADDRESS");
+        assertEquals("bundle-end", written[38], "the columns after them must not shift");
+    }
+
+    @Test
+    void cutsBothMacListsAtTheSameAddressOnceTheBudgetIsSpent() throws Exception {
+        // 4 000 bytes is the budget, and each row is charged the wider of its two addresses plus a
+        // separator. A 199 byte address therefore costs 200, and the twenty-first one is dropped.
+        String longMac = "A".repeat(199);
+        String longOriginal = "B".repeat(150);
+        List<String[]> rows = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            rows.add(macRow("busyuser", longMac, longOriginal));
+        }
+        stubReader(rows);
+        stubUsage(Map.of());
+
+        Path output = outputWithHeader("budget.csv");
+        assertEquals(1, definition.streamTo(report(), output));
+
+        String line = Files.readAllLines(output).get(1);
+        assertEquals(20, countOccurrences(line, longMac), "the budget stops the list at twenty addresses");
+        assertEquals(20, countOccurrences(line, longOriginal),
+                "both lists must be cut at the same address so the two columns stay aligned");
+    }
+
+    /** Splits one CSV line into its fields, honouring the quoting the writer applies. */
+    private static List<String> fields(String line) {
+        List<String> fields = new ArrayList<>();
+        StringBuilder field = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (quoted && c == '"' && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                field.append('"');
+                i++;
+            } else if (c == '"') {
+                quoted = !quoted;
+            } else if (c == ',' && !quoted) {
+                fields.add(field.toString());
+                field.setLength(0);
+            } else {
+                field.append(c);
+            }
+        }
+        fields.add(field.toString());
+        return fields;
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int count = 0;
+        int index = haystack.indexOf(needle);
+        while (index >= 0) {
+            count++;
+            index = haystack.indexOf(needle, index + needle.length());
+        }
+        return count;
+    }
+
+    @Test
     void aUserWhoseSessionsNamedNoNasLeavesTheColumnEmptyWithoutShiftingTheRow() throws Exception {
         stubReader(List.<String[]>of(databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1")));
         stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
@@ -334,6 +450,14 @@ class UserDataDumpReportDefinitionTest {
         values[35] = quota;
         values[UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE - 1] = "bundle-end";
         values[UserDumpSql.COL_QUOTA_BUCKET_ID - 1] = quotaBucketId;
+        return values;
+    }
+
+    /** A row of the fan-out the MAC join produces: one user, one of their MAC addresses. */
+    private String[] macRow(String userName, String macAddress, String originalMacAddress) {
+        String[] values = databaseRow(userName, "FTTH_50Mbps", "1024", "DATA_1");
+        values[19] = macAddress;
+        values[21] = originalMacAddress;
         return values;
     }
 

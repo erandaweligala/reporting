@@ -91,11 +91,9 @@ class UserDumpSqlTest {
     }
 
     @Test
-    void aggregatesTheSatelliteTablesOncePerUserRatherThanPerRow() {
+    void aggregatesTheBundleAndItsBucketsOncePerUserRatherThanPerRow() {
         String sql = build(null, null).sql();
 
-        assertTrue(sql.contains("LISTAGG(m.MAC_ADDRESS"), "MAC addresses must be collapsed in SQL");
-        assertTrue(sql.contains("LISTAGG(m.ORIGINAL_MAC_ADDRESS"));
         assertTrue(sql.contains("ROW_NUMBER() OVER (PARTITION BY si.USERNAME"),
                 "the active bundle must be picked analytically, not by a correlated sub-select");
         assertTrue(sql.contains("GROUP BY b.SERVICE_ID"), "buckets must be pivoted in one pass");
@@ -104,36 +102,48 @@ class UserDumpSqlTest {
     }
 
     @Test
-    void collapsesTheMacListsWithoutSyntaxOnlyANewerOracleParses() {
-        String sql = build(null, null).sql();
+    void carriesNothingThatDependsOnTheServerVersionToParse() {
+        String sql = build("a", "m").sql();
 
-        // LISTAGG's own ON OVERFLOW clause is 12.2 and later. An older server reaches the ON where
-        // it expects the closing bracket and rejects the entire statement with ORA-00907, so the
-        // dump fails outright instead of truncating a MAC list.
-        assertFalse(sql.contains("ON OVERFLOW"),
-                "the overflow clause does not parse before Oracle 12.2 and fails the whole dump");
-        assertTrue(sql.contains("LISTAGG(m.MAC_ADDRESS, ',')"));
-        assertTrue(sql.contains("LISTAGG(m.ORIGINAL_MAC_ADDRESS, ',')"));
+        // Every run of this report failed with ORA-00907 while the MAC addresses were collapsed
+        // with LISTAGG: first over its 12.2-only ON OVERFLOW clause, then over LISTAGG itself,
+        // which the server reaching the WITHIN rejects the same way. Nothing in the statement may
+        // be newer than the parser that rejected it — a construct that needs a particular version
+        // fails the whole dump, not one column.
+        assertFalse(sql.contains("LISTAGG"), "LISTAGG is what the server rejects with ORA-00907");
+        assertFalse(sql.contains("WITHIN GROUP"));
+        assertFalse(sql.contains("ON OVERFLOW"));
+        assertEquals(countOccurrences(sql, "("), countOccurrences(sql, ")"),
+                "an unbalanced statement is the other way to earn ORA-00907");
     }
 
     @Test
-    void dropsTheMacRowsThatWouldTakeAListPastWhatListaggCanReturn() {
-        String sql = build(null, null).sql();
+    void handsOutOneRowPerMacAddressForTheReaderToJoinUp() {
+        String sql = build("a", "m").sql();
 
-        // What the overflow clause used to do, done where every Oracle understands it: a running
-        // total of the bytes each row would contribute decides which rows reach the aggregate.
-        assertTrue(sql.contains("ROWS UNBOUNDED PRECEDING) AS LIST_BYTES"),
-                "the byte budget must be accumulated in the order the addresses are listed in");
-        assertTrue(sql.contains("WHERE m.LIST_BYTES <= 4000"),
-                "rows past the VARCHAR2 budget must be dropped before LISTAGG sees them");
-        // Charging each row the wider of its two addresses cuts both lists at the same row, so the
-        // MAC and original-MAC columns stay row-aligned.
-        assertTrue(sql.contains("SUM(GREATEST(NVL(LENGTHB(ma.MAC_ADDRESS), 0),"));
+        assertTrue(sql.contains("LEFT JOIN AAA_USER_MAC_ADDRESS mac ON mac.USER_NAME = u.USER_NAME"),
+                "the MAC addresses must be joined row for row rather than aggregated");
+        assertTrue(sql.contains("u.IPV6, mac.MAC_ADDRESS,"), "MAC_ADDRESS keeps its column position");
+        assertTrue(sql.contains("mac.ORIGINAL_MAC_ADDRESS, u.REMOTE_ID"),
+                "ORIGINAL_MAC_ADDRESS keeps its column position");
+    }
+
+    @Test
+    void boundsTheMacJoinInsideItsOwnConditionSoUsersWithoutOneSurvive() {
+        String sql = build("a", "m").sql();
+
+        // In the WHERE clause the same predicate would discard the outer join's null rows, and
+        // with them every user who holds no MAC address at all.
+        assertTrue(sql.contains("ON mac.USER_NAME = u.USER_NAME AND mac.USER_NAME >= ? "
+                        + "AND mac.USER_NAME < ? WHERE"),
+                "the shard bounds belong to the join condition, not the WHERE clause");
     }
 
     @Test
     void ordersByUsernameSoTheUsageStreamCanBeMergedIn() {
-        assertTrue(build(null, null).sql().trim().endsWith("ORDER BY u.USER_NAME"));
+        // The id is what puts a user's own rows in the order their addresses are listed in; the
+        // username is what the Elasticsearch stream is merged on.
+        assertTrue(build(null, null).sql().trim().endsWith("ORDER BY u.USER_NAME, mac.ID"));
     }
 
     @Test
