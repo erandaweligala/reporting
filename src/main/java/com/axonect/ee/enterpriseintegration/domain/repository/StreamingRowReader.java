@@ -1,6 +1,6 @@
 package com.axonect.ee.enterpriseintegration.domain.repository;
 
-import com.axonect.ee.enterpriseintegration.domain.constant.UserDumpSql;
+import com.axonect.ee.enterpriseintegration.domain.constant.SqlStatement;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -13,7 +13,7 @@ import java.sql.Statement;
 import java.util.List;
 
 /**
- * Streams the user dump query straight off a JDBC cursor.
+ * Streams a report's rows straight off a JDBC cursor.
  *
  * <p>Deliberately plain JDBC rather than JPA. Hibernate would build a managed entity per row and
  * hold it in the persistence context, which for a few million rows means both a wasted object
@@ -26,7 +26,7 @@ import java.util.List;
  */
 @Component
 @Slf4j
-public class UserDumpRowReader {
+public class StreamingRowReader {
 
     /** Consumes the cursor's current row. Implementations must not retain the ResultSet. */
     @FunctionalInterface
@@ -36,7 +36,7 @@ public class UserDumpRowReader {
 
     private final DataSource dataSource;
 
-    public UserDumpRowReader(DataSource dataSource) {
+    public StreamingRowReader(DataSource dataSource) {
         this.dataSource = dataSource;
     }
 
@@ -45,13 +45,36 @@ public class UserDumpRowReader {
      *
      * @return the number of rows read
      */
-    public long stream(UserDumpSql.Statement statement, int fetchSize, int timeoutSeconds, RowHandler handler)
+    public long stream(SqlStatement statement, int fetchSize, int timeoutSeconds, RowHandler handler)
             throws Exception {
+        return stream(statement, fetchSize, timeoutSeconds, false, handler);
+    }
+
+    /**
+     * As {@link #stream}, with the session forced into binary collation first.
+     *
+     * <p>Only a report whose ORDER BY has to agree with an ordering produced outside the database
+     * needs this — the user data dump merge-joins its cursor against an Elasticsearch aggregation,
+     * and a session that happened to default to a linguistic sort would silently mismatch users.
+     * An extract that reads a table end to end has no ordering to agree with and does not pay for
+     * the extra round trip.
+     *
+     * @return the number of rows read
+     */
+    public long streamInBinaryOrder(SqlStatement statement, int fetchSize, int timeoutSeconds, RowHandler handler)
+            throws Exception {
+        return stream(statement, fetchSize, timeoutSeconds, true, handler);
+    }
+
+    private long stream(SqlStatement statement, int fetchSize, int timeoutSeconds, boolean binarySort,
+                        RowHandler handler) throws Exception {
 
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             connection.setReadOnly(true);
-            applyBinarySort(connection);
+            if (binarySort) {
+                applyBinarySort(connection);
+            }
 
             try (PreparedStatement ps = connection.prepareStatement(
                     statement.sql(), ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
@@ -84,16 +107,15 @@ public class UserDumpRowReader {
     }
 
     /**
-     * Forces binary collation for this session so that the ORDER BY matches the UTF-8 ordering the
-     * Elasticsearch aggregation returns usernames in — the two are merge-joined, so a session that
-     * happened to default to a linguistic sort would silently mismatch users. It also keeps the
-     * username index usable for the sort instead of forcing a 3 million row sort in temp space.
+     * Forces binary collation for this session so that an ORDER BY matches the UTF-8 ordering the
+     * caller expects. It also keeps the ordered column's index usable for the sort instead of
+     * forcing a multi-million row sort in temp space.
      */
     private void applyBinarySort(Connection connection) {
         try (Statement statement = connection.createStatement()) {
             statement.execute("ALTER SESSION SET NLS_SORT='BINARY' NLS_COMP='BINARY'");
         } catch (SQLException e) {
-            log.warn("Could not force binary collation on the dump session; "
+            log.warn("Could not force binary collation on the reporting session; "
                     + "usage matching assumes the database already sorts usernames by byte value", e);
         }
     }
@@ -102,7 +124,7 @@ public class UserDumpRowReader {
         try {
             connection.rollback();
         } catch (SQLException e) {
-            log.warn("Failed to close the read-only dump transaction", e);
+            log.warn("Failed to close the read-only reporting transaction", e);
         }
     }
 }

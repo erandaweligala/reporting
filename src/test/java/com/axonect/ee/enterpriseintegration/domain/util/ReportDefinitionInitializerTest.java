@@ -1,8 +1,12 @@
 package com.axonect.ee.enterpriseintegration.domain.util;
 
+import com.axonect.ee.enterpriseintegration.application.config.TableExtractProperties;
+import com.axonect.ee.enterpriseintegration.domain.constant.TableExtracts;
 import com.axonect.ee.enterpriseintegration.domain.service.impl.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -16,6 +20,7 @@ class ReportDefinitionInitializerTest {
     private ErrorLogReportDefinition error;
     private AuditLogReportDefinition audit;
     private UserDataDumpReportDefinition userDataDump;
+    private List<TableExtractReportDefinition> tableExtracts;
 
     private ReportDefinitionInitializer initializer;
 
@@ -28,6 +33,9 @@ class ReportDefinitionInitializerTest {
         error = mock(ErrorLogReportDefinition.class);
         audit = mock(AuditLogReportDefinition.class);
         userDataDump = mock(UserDataDumpReportDefinition.class);
+        tableExtracts = TableExtracts.ALL.stream()
+                .map(spec -> new TableExtractReportDefinition(spec, null, new TableExtractProperties()))
+                .toList();
 
         initializer = new ReportDefinitionInitializer(
                 messageLog,
@@ -36,7 +44,8 @@ class ReportDefinitionInitializerTest {
                 subscriber,
                 error,
                 audit,
-                userDataDump
+                userDataDump,
+                tableExtracts
         );
 
     }
@@ -65,5 +74,22 @@ class ReportDefinitionInitializerTest {
 
         assertSame(userDataDump,
                 ReportDefinitionsRegistry.getDefinition(UserDataDumpReportDefinition.REPORT_TYPE));
+    }
+
+    @Test
+    void init_shouldRegisterEveryTableExtractUnderItsOwnReportType() {
+        initializer.init();
+
+        for (TableExtractReportDefinition extract : tableExtracts) {
+            assertSame(extract, ReportDefinitionsRegistry.getDefinition(extract.reportType()));
+        }
+
+        // Named explicitly as well: the three report types are what callers ask for, so a spec
+        // renamed by accident should fail here and not only at the first request for it.
+        assertEquals(
+                List.of(TableExtracts.MAC_SERVICE_TABLE_TYPE,
+                        TableExtracts.PLAN_TO_BUCKET_TYPE,
+                        TableExtracts.BUCKET_INSTANCE_TYPE),
+                tableExtracts.stream().map(TableExtractReportDefinition::reportType).toList());
     }
 }

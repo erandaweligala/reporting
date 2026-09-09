@@ -18,13 +18,13 @@ class UserDumpSqlTest {
 
     private static final String DATE_FORMAT = "YYYY-MM-DD HH24:MI:SS.FF3";
 
-    private UserDumpSql.Statement build(String from, String to) {
+    private SqlStatement build(String from, String to) {
         return UserDumpSql.build(from, to, DAY_START, DAY_END, "BANDWIDTH", "DATA", DATE_FORMAT);
     }
 
     @Test
     void bindsParametersInThePlaceholderOrder() {
-        UserDumpSql.Statement statement = build("a", "m");
+        SqlStatement statement = build("a", "m");
 
         assertEquals(countPlaceholders(statement.sql()), statement.params().size(),
                 "every ? must have a value bound to it");
@@ -38,7 +38,7 @@ class UserDumpSqlTest {
 
     @Test
     void unboundedShardOmitsTheRangePredicatesEntirely() {
-        UserDumpSql.Statement statement = build(null, null);
+        SqlStatement statement = build(null, null);
 
         assertEquals(countPlaceholders(statement.sql()), statement.params().size());
         assertEquals(List.of(DAY_END, DAY_START, "BANDWIDTH", "DATA", "DATA"),

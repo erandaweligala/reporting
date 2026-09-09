@@ -46,7 +46,7 @@ its table in one pass and is hash-joined; the bucket view is joined to the bundl
 optimizer prunes it to the shard's own services rather than scanning `BUCKET_INSTANCE` whole.
 
 **One cursor, not pages.** Rows stream off an open, read-only, forward-only JDBC cursor with a
-5 000 row fetch size (`UserDumpRowReader`). Offset pagination — what the paged report framework
+5 000 row fetch size (`StreamingRowReader`). Offset pagination — what the paged report framework
 does — re-walks and discards everything before each page, so the cost of the last page grows with
 the size of the report.
 

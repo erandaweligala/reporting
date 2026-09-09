@@ -184,6 +184,14 @@ report:
     stale-threshold-minutes: 20
     check-interval-ms: 1200000   # 20 * 60 * 1000
 
+  # MAC_SERVICE_TABLE, PLAN_TO_BUCKET and BUCKET_INSTANCE: whole-table extracts, as CSV.
+  # One cursor and one sequential pass per extract; the knobs below are what bound its footprint.
+  table-extract:
+    jdbc-fetch-size: 5000        # rows Oracle ships per round trip
+    query-timeout-seconds: 7200  # an extract that has gone wrong is cancelled, not left running
+    csv-buffer-bytes: 1048576    # 1 MB in front of the output file
+    date-format: "YYYY-MM-DD HH24:MI:SS.FF3"  # Oracle format model for every date column
+
   # USER_DATA_DUMP: the full subscriber base (~3M rows) for the previous day, as CSV.
   user-dump:
     days-back: 1                 # 1 = D-1
