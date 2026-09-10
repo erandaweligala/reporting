@@ -27,6 +27,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -99,6 +100,23 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             new CsvColumn("quota", "QUOTA"),
             new CsvColumn("utlized_quota", "UTLIZED_QUOTA"),
             new CsvColumn("bundle_deactivation_date", "BUNDLE_DEACTIVATION_DATE"));
+
+    /**
+     * Keys of the columns {@link UserDumpSql} renders with TO_CHAR, and so the columns a
+     * spreadsheet has to be stopped from converting — see {@code excel-safe-timestamps} on
+     * {@link UserDumpProperties}. They are named rather than numbered because the numbers move
+     * with the column order and these are the only positions in this class that could move
+     * silently: a mistake here writes a MAC address as a date, not a compile error.
+     *
+     * <p>CYCLE_DATE is not among them. It is selected as it stands, not rendered as a timestamp,
+     * and the day-of-month it holds is not something a spreadsheet mistakes for a date.
+     */
+    private static final Set<String> TIMESTAMP_COLUMNS = Set.of(
+            "created_date",
+            "updated_date",
+            "customer_activation_date",
+            "bundle_activation_date",
+            "bundle_deactivation_date");
 
     /**
      * Zero-based positions of the two columns that are not read from the database. AAA_USER
@@ -234,7 +252,8 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         long start = System.currentTimeMillis();
 
         try (UserUsageCursor usage = usageAggregationClient.open(day, range.fromInclusive(), range.toExclusive());
-             StreamingCsvWriter writer = new StreamingCsvWriter(target, properties.getCsvBufferBytes())) {
+             StreamingCsvWriter writer = new StreamingCsvWriter(
+                     target, properties.getCsvBufferBytes(), timestampColumns())) {
 
             // One buffer per shard, reused for every user. Each shard runs on its own thread and
             // never shares it.
@@ -252,6 +271,23 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
                     range.fromInclusive(), range.toExclusive(), rows.written(), System.currentTimeMillis() - start);
             return rows.written();
         }
+    }
+
+    /**
+     * The flag per column the writer needs: true where {@link #TIMESTAMP_COLUMNS} names the
+     * column, so the value goes to the file in a form a spreadsheet displays rather than converts.
+     * Null when the dump is configured to write the bare text, which leaves the writer behaving
+     * exactly as it did before the column was named at all.
+     */
+    private boolean[] timestampColumns() {
+        if (!properties.isExcelSafeTimestamps()) {
+            return null;
+        }
+        boolean[] flags = new boolean[COLUMNS.size()];
+        for (int i = 0; i < COLUMNS.size(); i++) {
+            flags[i] = TIMESTAMP_COLUMNS.contains(COLUMNS.get(i).getKey());
+        }
+        return flags;
     }
 
     /**

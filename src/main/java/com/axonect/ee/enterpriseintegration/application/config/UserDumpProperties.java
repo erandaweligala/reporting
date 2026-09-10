@@ -47,21 +47,38 @@ public class UserDumpProperties {
     private int workerThreads = 0;
 
     /**
-     * Oracle format model applied to every timestamp column of the dump, and deliberately without
-     * a fractional seconds element.
+     * Oracle format model applied to every timestamp column of the dump, without a fractional
+     * seconds element.
      *
-     * <p>The dump is a CSV, and the operator checking one opens it in Excel. A timestamp that
-     * carries milliseconds is a shape Excel has no date format for: it still converts the text to a
-     * date serial, but leaves the cell in the General format, so every date column reads as
-     * {@code 46271.07939} instead of a date. Rendered as {@code 2026-09-06 01:54:19} the same cell
-     * is recognised and displayed as the timestamp it is.
-     *
-     * <p>What that costs is the millisecond field the earlier {@code FF3} model wrote: TO_CHAR
-     * truncates rather than rounds, so a timestamp stored with a fraction reaches the file as its
-     * whole second. That is the trade the format asks for. Putting FF3 back here restores the
-     * milliseconds and the serial numbers together — they are the same change.
+     * <p>It is not what makes a dump readable in a spreadsheet — {@link #excelSafeTimestamps} is,
+     * and it normalises away a fraction this model asks for. Dropping the {@code FF3} was an
+     * earlier attempt at that, on the reasoning that Excel has no date format for a fractional
+     * timestamp; the date columns still came out as {@code 46271.07939}. What the model does
+     * settle is that the five columns agree with each other and with the sample the consuming
+     * system loads, whatever the session's NLS settings are.
      */
     private String dateFormat = "YYYY-MM-DD HH24:MI:SS";
+
+    /**
+     * Whether the dump's timestamp columns are written in the form a spreadsheet displays rather
+     * than converts — {@code ="2026-09-06 01:54:19"} instead of {@code 2026-09-06 01:54:19}.
+     *
+     * <p>On, because the operator who checks a dump opens it in Excel, and Excel does not read a
+     * CSV timestamp as a timestamp: it converts the text to the day number behind it and shows
+     * that number. Dropping the milliseconds from {@link #dateFormat} was an attempt at feeding
+     * the conversion a shape it would format as a date, and the date columns still came out as
+     * {@code 46271.07939} — so the conversion is what is stopped here instead, which is the same
+     * thing the batch exporter behind the paged reports has always done. The rendered text is
+     * normalised to {@code yyyy-MM-dd HH:mm:ss} on the way out, so the displayed format no longer
+     * depends on the format model a deployment happens to carry.
+     *
+     * <p>Off is for a consumer that reads the dump with something other than a spreadsheet and
+     * wants the bare text back: the {@code ="…"} is a spreadsheet formula, and every other reader
+     * sees the six characters around the timestamp. Nothing else about the file changes with it.
+     *
+     * @see com.axonect.ee.enterpriseintegration.domain.util.ExcelSafeTimestamp
+     */
+    private boolean excelSafeTimestamps = true;
 
     /** BUCKET_INSTANCE.BUCKET_TYPE that carries the plan bandwidth. */
     private String bandwidthBucketType = "BANDWIDTH";

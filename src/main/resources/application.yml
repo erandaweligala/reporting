@@ -201,10 +201,15 @@ report:
     jdbc-fetch-size: 5000        # rows Oracle ships per round trip
     query-timeout-seconds: 7200
     csv-buffer-bytes: 1048576    # 1 MB in front of the output file
-    # Oracle format model for every timestamp column. No FF element: Excel has no date format for
-    # a timestamp carrying milliseconds, so it shows the date columns as serial numbers
-    # (46271.07939) instead of dates when an operator opens the dump.
+    # Oracle format model for every timestamp column.
     date-format: "YYYY-MM-DD HH24:MI:SS"
+    # Write the timestamp columns as ="2026-09-06 01:54:19" rather than as bare text. Excel does
+    # not read a CSV timestamp as a timestamp — it converts the text to the day number behind it
+    # and shows that number (46271.07939), which is what the date columns of the dump were
+    # reading. The ="..." form is a formula whose value is the string, so it is displayed exactly
+    # as written; the text is normalised to yyyy-MM-dd HH:mm:ss whatever date-format above says.
+    # Set false for a consumer that reads the dump with something other than a spreadsheet.
+    excel-safe-timestamps: true
     bandwidth-bucket-type: BANDWIDTH       # BUCKET_INSTANCE.BUCKET_TYPE holding PLAN_BANDWIDTH
     quota-bucket-type: DATA                # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA
     usage:

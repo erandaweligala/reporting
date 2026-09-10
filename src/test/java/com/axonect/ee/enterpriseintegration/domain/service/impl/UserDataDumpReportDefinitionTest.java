@@ -290,12 +290,10 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
-    void rendersTimestampsInAShapeExcelReadsAsADateRatherThanASerialNumber() throws Exception {
-        // The dump is a CSV and the operator checking one opens it in Excel. A timestamp carrying
-        // milliseconds is a shape Excel has no date format for: it converts the text to a date
-        // serial and leaves the cell General, so every date column reads as 46271.07939. The
-        // shipped default is what keeps that from happening, so it is pinned here rather than left
-        // to whoever next edits application.yml.
+    void rendersEveryTimestampColumnUnderTheOneConfiguredModel() throws Exception {
+        // The shipped model, pinned here rather than left to whoever next edits application.yml.
+        // It is not what makes the dump readable in a spreadsheet — see the test below for that —
+        // but it is what makes the five columns agree with each other and with the header.
         assertEquals("YYYY-MM-DD HH24:MI:SS", new UserDumpProperties().getDateFormat());
 
         stubReader(List.of());
@@ -309,7 +307,83 @@ class UserDataDumpReportDefinitionTest {
         String sql = statement.getValue().sql();
         assertEquals(5, countOccurrences(sql, "'YYYY-MM-DD HH24:MI:SS'"),
                 "created, updated, customer activation, bundle activation and deactivation dates");
-        assertFalse(sql.contains("FF"), "a fractional seconds element is what Excel cannot format");
+        assertFalse(sql.contains("FF"), "the shipped model carries no fractional seconds element");
+    }
+
+    @Test
+    void writesTheFiveDateColumnsSoASpreadsheetDisplaysThemInsteadOfConvertingThem() throws Exception {
+        // What the operator opened the dump and saw was 46271.07939 in every date column: Excel
+        // reads a CSV timestamp as a date, replaces the text with the day number behind it and
+        // shows the number. Dropping the milliseconds from the format model did not stop it. The
+        // ="..." form does — it is a formula whose value is the string — and it is applied to
+        // exactly the five columns the statement renders with TO_CHAR, not to the row.
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1");
+        dbRow[9] = "2026-09-06 01:54:19";                                    // CREATED_DATE
+        dbRow[27] = "2026-09-06 01:54:19";                                   // UPDATED_DATE
+        dbRow[31] = "2026-09-06 01:54:19";                                   // CUSTOMER_ACTIVATION_DATE
+        dbRow[32] = "2026-09-10 12:44:38";                                   // BUNDLE_ACTIVATION_DATE
+        dbRow[UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE - 1] = "2026-12-09 12:44:38";
+        stubReader(List.<String[]>of(dbRow));
+        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+
+        Path output = outputWithHeader("excel-safe.csv");
+        definition.streamTo(report(), output);
+
+        List<String> lines = Files.readAllLines(output);
+        assertEquals(EXPECTED_HEADER, lines.get(0), "the header is a row of names, never rewritten");
+
+        String[] written = lines.get(1).split(",", -1);
+        assertEquals(39, written.length, "the formula carries no delimiter, so no column shifts");
+        assertEquals("=\"2026-09-06 01:54:19\"", written[9], "CREATED_DATE");
+        assertEquals("=\"2026-09-06 01:54:19\"", written[27], "UPDATED_DATE");
+        assertEquals("=\"2026-09-06 01:54:19\"", written[32], "CUSTOMER_ACTIVATION_DATE");
+        assertEquals("=\"2026-09-10 12:44:38\"", written[33], "BUNDLE_ACTIVATION_DATE");
+        assertEquals("=\"2026-12-09 12:44:38\"", written[38], "BUNDLE_DEACTIVATION_DATE");
+        // CYCLE_DATE is not rendered as a timestamp and must not be treated as one, and neither
+        // must any column that merely sits beside a date.
+        assertEquals("col12", written[11], "CYCLE_DATE");
+        assertEquals("taiwowilliams", written[28], "SLMN");
+        assertEquals("FTTH_50Mbps", written[35], "PLAN_BANDWIDTH");
+    }
+
+    @Test
+    void aDeploymentWhoseModelStillCarriesMillisecondsGetsTheSameCell() throws Exception {
+        // The displayed format is a property of the file, not of the configuration: whatever
+        // date-format a deployment turns out to carry, the operator reads yyyy-MM-dd HH:mm:ss.
+        properties.setDateFormat("YYYY-MM-DD HH24:MI:SS.FF3");
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1");
+        dbRow[9] = "2026-09-06 01:54:19.123";
+        stubReader(List.<String[]>of(dbRow));
+        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+
+        Path output = outputWithHeader("fractional.csv");
+        definition.streamTo(report(), output);
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals("=\"2026-09-06 01:54:19\"", written[9], "CREATED_DATE");
+    }
+
+    @Test
+    void switchingTheSpreadsheetFormOffWritesTheDatabasesOwnTextBack() throws Exception {
+        // The ="..." is a spreadsheet formula, and a consumer that loads the dump with something
+        // else wants the bare timestamp. Nothing but the five columns changes with the switch.
+        properties.setExcelSafeTimestamps(false);
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1");
+        dbRow[9] = "2026-09-06 01:54:19";
+        stubReader(List.<String[]>of(dbRow));
+        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+
+        Path output = outputWithHeader("plain.csv");
+        definition.streamTo(report(), output);
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals(39, written.length);
+        assertEquals("2026-09-06 01:54:19", written[9], "CREATED_DATE");
+    }
+
+    @Test
+    void theSpreadsheetFormIsOnUnlessADeploymentTurnsItOff() {
+        assertTrue(new UserDumpProperties().isExcelSafeTimestamps());
     }
 
     @Test
