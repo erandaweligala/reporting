@@ -190,7 +190,17 @@ report:
     jdbc-fetch-size: 5000        # rows Oracle ships per round trip
     query-timeout-seconds: 7200  # an extract that has gone wrong is cancelled, not left running
     csv-buffer-bytes: 1048576    # 1 MB in front of the output file
-    date-format: "YYYY-MM-DD HH24:MI:SS.FF3"  # Oracle format model for every date column
+    # Oracle format model for every date column. The samples carried milliseconds; the operator
+    # who opens an extract reads yyyy-MM-dd HH:mm:ss, and excel-safe-timestamps below normalises a
+    # fraction away in any case, so the model no longer asks for one.
+    date-format: "YYYY-MM-DD HH24:MI:SS"
+    # Write the date columns as ="2026-08-18 14:31:23" rather than as bare text. Excel does not
+    # read a CSV timestamp as a timestamp — it converts the text to the day number behind it and
+    # shows that number (46271.07939), which is what the date columns of all three extracts were
+    # reading. The ="..." form is a formula whose value is the string, so it is displayed exactly
+    # as written. Set false for a consumer that loads an extract with something other than a
+    # spreadsheet and wants the database's own text.
+    excel-safe-timestamps: true
 
   # USER_DATA_DUMP: the full subscriber base (~3M rows) for the previous day, as CSV.
   user-dump:
