@@ -34,11 +34,16 @@ differ from it in ways that must be preserved, so every header line is asserted 
 - **`BUCKET_INSTANCE`** reports `USAGE` *before* `UPDATED_AT`, where the DDL orders them the other
   way, and omits `IS_UNLIMITED` entirely even though the table carries it.
 
-Every date and timestamp column is written as `yyyy-MM-dd HH:mm:ss.SSS`, matching the samples. The
-`date-format` setting below is the Oracle model that produces it; because it carries fractional
-seconds each column is CAST to `TIMESTAMP` before `TO_CHAR` sees it (`TO_CHAR` of a `DATE` with an
-`FF` element raises ORA-01821, and the extract does not depend on which of the two each column
-happens to be).
+Every date and timestamp column is reported as `yyyy-MM-dd HH:mm:ss`, and is displayed that way by
+the spreadsheet an extract is checked in — see [Dates](#dates) below for both halves of that. The
+samples carried milliseconds; they are no longer reported, because Excel has no date format for a
+fractional timestamp and the `="..."` form the columns are written in normalises a fraction away in
+any case.
+
+Each column is still CAST to `TIMESTAMP` before `TO_CHAR` sees it, even though the shipped model no
+longer carries an `FF` element: `TO_CHAR` of a `DATE` with `FF` raises ORA-01821, so the cast is
+what keeps the statement independent both of which of the two a given column is and of whether a
+deployment's `date-format` asks for a fraction.
 
 ## How a run is shaped
 
@@ -79,20 +84,44 @@ It also makes the file independent of the JVM's locale and time zone.
 
 **A writer that stays open.** `StreamingCsvWriter` holds one buffered handle for the life of the
 extract and formats straight into it, so the file is flushed roughly once per buffer rather than
-once per batch, and values reach it exactly as the database produced them.
-
-The extracts deliberately do not take the writer's `="..."` timestamp form, which the user data
-dump does take so that Excel displays its date columns instead of converting them to serial
-numbers (see `docs/user-data-dump.md`). These three files are loaded by another system, and their
-samples carry the milliseconds the `="..."` form normalises away — so an extract opened in Excel
-shows its date columns as serials, and that is the trade the samples ask for. Naming a timestamp
-column to the writer is what would change it, one line in `TableExtractReportDefinition`.
+once per batch. Values reach it as the database produced them, with one exception the extract asks
+for by name — see below.
 
 **A bounded footprint on everything else.** An extract runs on the report executor like any other
 report, so at most `report.max-concurrent` reports are in flight and the rest queue as `Pending`.
 While it runs it holds one Hikari connection and one cursor — no shard pool, no second data source.
 `query-timeout-seconds` bounds a scan that has gone wrong rather than letting it hold that
 connection indefinitely.
+
+## Dates
+
+An extract is opened in a spreadsheet before it is loaded anywhere, and Excel does not read a CSV
+timestamp as a timestamp: it recognises the text as a date, replaces it with the day number behind
+it and does not reliably put a date format on the cell it just converted. What the operator read in
+every date column of all three extracts was `46271.07939`.
+
+No format model avoids that — there is no text shape that reads as `yyyy-MM-dd HH:mm:ss` and is
+also left alone. So the conversion is stopped instead: a field that begins with `=` is a formula,
+and `="2026-08-18 14:31:23"` is the formula whose value is that string. Excel shows it exactly as
+written and keeps it as text through a copy or a save. This is what the user data dump does
+(`docs/user-data-dump.md`) and what the batch exporter behind the paged reports has always done.
+
+Two things follow from where the form is applied:
+
+- **It is applied per column, not per row.** The flags come from the spec — a column declared with
+  `Column.at` is exactly a column the statement renders with `TO_CHAR` — so a column added to an
+  extract cannot be rendered as a date by the statement and written as raw text by the writer. A
+  number, a name or an empty column is written as it always was; `ExcelSafeTimestamp` returns
+  nothing for a value it does not recognise as a timestamp, so a column that has gone wrong is not
+  dressed up as a date either.
+- **The displayed format is a property of the file, not of the configuration.** The rendered text
+  is normalised to `yyyy-MM-dd HH:mm:ss` on the way out, so a deployment whose `date-format` still
+  carries `FF3` produces the same cell as one that does not.
+
+`excel-safe-timestamps: false` writes the database's own text back, for a consumer that loads an
+extract with something other than a spreadsheet: the `="..."` is a spreadsheet formula, and every
+other reader sees the six characters around the timestamp. Nothing else about the file changes with
+it.
 
 ## Running one
 
@@ -134,7 +163,8 @@ report:
     jdbc-fetch-size: 5000        # rows Oracle ships per round trip
     query-timeout-seconds: 7200  # an extract that has gone wrong is cancelled, not left running
     csv-buffer-bytes: 1048576    # 1 MB in front of the output file
-    date-format: "YYYY-MM-DD HH24:MI:SS.FF3"
+    date-format: "YYYY-MM-DD HH24:MI:SS"  # Oracle model behind every date column
+    excel-safe-timestamps: true  # write them as ="..." so Excel displays them
 ```
 
 The settings are shared by all three extracts: they differ only in what they select, and the

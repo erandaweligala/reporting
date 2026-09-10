@@ -39,6 +39,10 @@ import java.util.Locale;
  *       no {@code Timestamp} or {@code BigDecimal} is allocated per column per row.</li>
  * </ul>
  *
+ * <p>The columns the spec renders with TO_CHAR are named to the writer, which writes them in the
+ * form a spreadsheet displays rather than converts; see {@link #timestampColumns()} and
+ * {@code report.table-extract.excel-safe-timestamps}.
+ *
  * <p>The extract runs on the report executor like any other report, so at most
  * {@code report.max-concurrent} of them can be in flight and the rest queue as Pending. That, and
  * a single connection held for the length of one extract, is the whole footprint on the database.
@@ -81,7 +85,8 @@ public class TableExtractReportDefinition implements StreamingReportDefinition {
         // read, so it is safe to reuse and saves an array per row.
         String[] row = new String[columns.size()];
 
-        try (StreamingCsvWriter writer = new StreamingCsvWriter(outputPath, properties.getCsvBufferBytes())) {
+        try (StreamingCsvWriter writer = new StreamingCsvWriter(
+                outputPath, properties.getCsvBufferBytes(), timestampColumns())) {
             long rows = rowReader.stream(
                     statement,
                     properties.getJdbcFetchSize(),
@@ -92,6 +97,29 @@ public class TableExtractReportDefinition implements StreamingReportDefinition {
                     report.getId(), spec.reportType(), rows, System.currentTimeMillis() - start);
             return rows;
         }
+    }
+
+    /**
+     * The flag per column the writer needs: true where the extract renders the column with TO_CHAR,
+     * so the value reaches the file as {@code ="2026-08-18 14:31:23"} and an operator opening the
+     * extract reads the timestamp rather than the day number Excel would otherwise convert it to.
+     * Null when the extracts are configured to write the database's own text, which leaves the
+     * writer behaving exactly as it did before any column was named to it.
+     *
+     * <p>The flags are derived from the spec rather than from a list of column names kept beside
+     * it. {@link TableExtractSql.Column#at} is already the declaration that a column is a
+     * timestamp — it is what puts the column inside the TO_CHAR — so a column added to an extract
+     * cannot be rendered as a date by the statement and written as raw text by the writer.
+     */
+    private boolean[] timestampColumns() {
+        if (!properties.isExcelSafeTimestamps()) {
+            return null;
+        }
+        boolean[] flags = new boolean[spec.columns().size()];
+        for (int i = 0; i < flags.length; i++) {
+            flags[i] = spec.columns().get(i).timestamp();
+        }
+        return flags;
     }
 
     private void writeRow(ResultSet resultSet, String[] row, StreamingCsvWriter writer) throws Exception {
