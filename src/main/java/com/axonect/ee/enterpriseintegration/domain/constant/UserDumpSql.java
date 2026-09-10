@@ -140,7 +140,7 @@ public final class UserDumpSql {
         params.add(quotaBucket);
         params.add(quotaBucket);
 
-        sql.append(" SELECT u.USER_NAME, u.GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
+        sql.append(" SELECT u.USER_NAME, u.BANDWIDTH AS GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
            .append("        u.CONCURRENCY, u.CONTACT_EMAIL, u.CONTACT_NAME, u.CONTACT_NUMBER,")
            .append("        ").append(asText("u.CREATED_DATE", fmt, "CREATED_DATE")).append(",")
            .append("        u.CUSTOM_TIMEOUT, u.CYCLE_DATE, u.ENCRYPTION_METHOD, u.GROUP_ID, u.IDLE_TIMEOUT,")
