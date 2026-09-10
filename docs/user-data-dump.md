@@ -37,13 +37,24 @@ user whose sessions named more than one NAS that day is reported under the one m
 a user with no session that day gets an empty column, exactly as they get an empty
 `UTLIZED_QUOTA`.
 
-Two more parts of that contract are fixed by the sample extract rather than by our own taste. Every
-timestamp is written as `yyyy-MM-dd HH:mm:ss.SSS` — the `date-format` below is the Oracle model that
-produces it, and because it carries fractional seconds each column is CAST to `TIMESTAMP` before
-`TO_CHAR` sees it (`TO_CHAR` of a `DATE` with an `FF` element raises ORA-01821, and the dump does not
-depend on which of the two each column happens to be). And `QUOTA` is left **empty** for a bundle
-whose data bucket is unlimited: the consumer reads a blank there as "no cap", so `UserDumpSql`
-excludes unlimited buckets from the pivot rather than writing a label into the column.
+Every timestamp is written as `yyyy-MM-dd HH:mm:ss` — the `date-format` below is the Oracle model
+that produces it. Each column is still CAST to `TIMESTAMP` before `TO_CHAR` sees it, so the
+statement does not depend on which of `DATE` and `TIMESTAMP` each column happens to be and so the
+model can carry fractional seconds without raising ORA-01821 (`TO_CHAR` of a `DATE` with an `FF`
+element does).
+
+**No milliseconds, because of Excel.** The sample extract writes `yyyy-MM-dd HH:mm:ss.SSS` and this
+dump followed it, which is how the date columns came to read `46271.07939` when an operator opened
+one. A timestamp carrying milliseconds is a shape Excel has no date format for: it converts the text
+to a date serial all the same but leaves the cell in the General format, so what is displayed is the
+serial itself. Without the `FF3` the same value reads `2026-09-06 01:54:19`, as a date. The cost is
+the millisecond field — `TO_CHAR` truncates, so a stored fraction reaches the file as its whole
+second — and `date-format` is where a consumer that turns out to need it back is served, at the
+price of the serial numbers returning with it.
+
+`QUOTA` is left **empty** for a bundle whose data bucket is unlimited: the consumer reads a blank
+there as "no cap", so `UserDumpSql` excludes unlimited buckets from the pivot rather than writing a
+label into the column.
 
 ## How a run is shaped
 
@@ -188,7 +199,7 @@ report:
     jdbc-fetch-size: 5000
     query-timeout-seconds: 7200
     csv-buffer-bytes: 1048576
-    date-format: "YYYY-MM-DD HH24:MI:SS.FF3"
+    date-format: "YYYY-MM-DD HH24:MI:SS"   # no FF: Excel shows a fractional timestamp as a serial
     bandwidth-bucket-type: BANDWIDTH
     quota-bucket-type: DATA
     usage:

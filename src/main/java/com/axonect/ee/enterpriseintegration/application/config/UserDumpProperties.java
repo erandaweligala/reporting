@@ -47,10 +47,21 @@ public class UserDumpProperties {
     private int workerThreads = 0;
 
     /**
-     * Oracle format model applied to every timestamp column of the dump. Milliseconds are part of
-     * the format the consuming system reads, so the model carries FF3.
+     * Oracle format model applied to every timestamp column of the dump, and deliberately without
+     * a fractional seconds element.
+     *
+     * <p>The dump is a CSV, and the operator checking one opens it in Excel. A timestamp that
+     * carries milliseconds is a shape Excel has no date format for: it still converts the text to a
+     * date serial, but leaves the cell in the General format, so every date column reads as
+     * {@code 46271.07939} instead of a date. Rendered as {@code 2026-09-06 01:54:19} the same cell
+     * is recognised and displayed as the timestamp it is.
+     *
+     * <p>What that costs is the millisecond field the earlier {@code FF3} model wrote: TO_CHAR
+     * truncates rather than rounds, so a timestamp stored with a fraction reaches the file as its
+     * whole second. That is the trade the format asks for. Putting FF3 back here restores the
+     * milliseconds and the serial numbers together — they are the same change.
      */
-    private String dateFormat = "YYYY-MM-DD HH24:MI:SS.FF3";
+    private String dateFormat = "YYYY-MM-DD HH24:MI:SS";
 
     /** BUCKET_INSTANCE.BUCKET_TYPE that carries the plan bandwidth. */
     private String bandwidthBucketType = "BANDWIDTH";
