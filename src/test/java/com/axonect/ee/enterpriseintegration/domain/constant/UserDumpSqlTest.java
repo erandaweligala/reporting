@@ -81,6 +81,18 @@ class UserDumpSqlTest {
     }
 
     @Test
+    void reportsTheTemplateIdUnderNotificationTemplatesBecauseTheTableHasNoSuchColumn() {
+        String sql = build(null, null).sql();
+
+        // Selecting a column AAA_USER does not have fails the whole statement with ORA-00904 on
+        // every shard, not just the one column, so the dump reports TEMPLATE_ID in its place.
+        assertFalse(sql.contains("u.NOTIFICATION_TEMPLATES"),
+                "AAA_USER has no NOTIFICATION_TEMPLATES column to select");
+        assertTrue(sql.contains("u.VLAN_ID, u.TEMPLATE_ID AS NOTIFICATION_TEMPLATES,"),
+                "TEMPLATE_ID must be selected, under the dump's own name, in that position");
+    }
+
+    @Test
     void leavesTheNasIpAddressToTheElasticsearchLookup() {
         String sql = build(null, null).sql();
 
