@@ -4,6 +4,7 @@ import com.axonect.ee.enterpriseintegration.application.config.UserDumpPropertie
 import com.axonect.ee.enterpriseintegration.application.transport.response.CsvColumn;
 import com.axonect.ee.enterpriseintegration.domain.client.UsageAggregationClient;
 import com.axonect.ee.enterpriseintegration.domain.client.UserUsageCursor;
+import com.axonect.ee.enterpriseintegration.domain.constant.SqlStatement;
 import com.axonect.ee.enterpriseintegration.domain.constant.UserDumpSql;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
 import com.axonect.ee.enterpriseintegration.domain.repository.StreamingRowReader;
@@ -26,6 +27,7 @@ import java.util.Comparator;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -285,6 +287,29 @@ class UserDataDumpReportDefinitionTest {
         assertEquals("", written[30], "NAS_IP_ADDRESS");
         assertEquals("", written[37], "UTLIZED_QUOTA");
         assertEquals("bundle-end", written[38], "the columns after them must not shift");
+    }
+
+    @Test
+    void rendersTimestampsInAShapeExcelReadsAsADateRatherThanASerialNumber() throws Exception {
+        // The dump is a CSV and the operator checking one opens it in Excel. A timestamp carrying
+        // milliseconds is a shape Excel has no date format for: it converts the text to a date
+        // serial and leaves the cell General, so every date column reads as 46271.07939. The
+        // shipped default is what keeps that from happening, so it is pinned here rather than left
+        // to whoever next edits application.yml.
+        assertEquals("YYYY-MM-DD HH24:MI:SS", new UserDumpProperties().getDateFormat());
+
+        stubReader(List.of());
+        stubUsage(Map.of());
+
+        definition.streamTo(report(), outputWithHeader("format.csv"));
+
+        ArgumentCaptor<SqlStatement> statement = ArgumentCaptor.forClass(SqlStatement.class);
+        verify(rowReader).streamInBinaryOrder(statement.capture(), anyInt(), anyInt(), any());
+
+        String sql = statement.getValue().sql();
+        assertEquals(5, countOccurrences(sql, "'YYYY-MM-DD HH24:MI:SS'"),
+                "created, updated, customer activation, bundle activation and deactivation dates");
+        assertFalse(sql.contains("FF"), "a fractional seconds element is what Excel cannot format");
     }
 
     @Test

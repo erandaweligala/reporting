@@ -16,7 +16,11 @@ class UserDumpSqlTest {
     private static final Timestamp DAY_START = Timestamp.valueOf(LocalDate.of(2026, 8, 22).atStartOfDay());
     private static final Timestamp DAY_END = Timestamp.valueOf(LocalDate.of(2026, 8, 23).atStartOfDay());
 
-    private static final String DATE_FORMAT = "YYYY-MM-DD HH24:MI:SS.FF3";
+    /**
+     * The model the dump ships with. It carries no fractional seconds: Excel has no date format
+     * for a timestamp that does, and shows the date columns of the opened CSV as serial numbers.
+     */
+    private static final String DATE_FORMAT = "YYYY-MM-DD HH24:MI:SS";
 
     private SqlStatement build(String from, String to) {
         return UserDumpSql.build(from, to, DAY_START, DAY_END, "BANDWIDTH", "DATA", DATE_FORMAT);
@@ -178,9 +182,16 @@ class UserDumpSqlTest {
     void castsEveryTimestampSoAFractionalSecondsModelIsLegalOnDateColumns() {
         String sql = build(null, null).sql();
 
-        // TO_CHAR of a DATE with an FF element raises ORA-01821, and the dump's format carries
-        // milliseconds, so every timestamp has to reach TO_CHAR as a TIMESTAMP.
+        // TO_CHAR of a DATE with an FF element raises ORA-01821. The dump's own model no longer
+        // carries one — Excel shows a fractional timestamp as a serial number — but the cast is
+        // what lets it be configured back without the statement failing on a DATE column, and it
+        // costs nothing on a column that is a TIMESTAMP already.
         assertEquals(5, countOccurrences(sql, "AS TIMESTAMP)"));
+        assertEquals(5, countOccurrences(
+                UserDumpSql.build(null, null, DAY_START, DAY_END, "BANDWIDTH", "DATA",
+                        "YYYY-MM-DD HH24:MI:SS.FF3").sql(),
+                "AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS.FF3')"),
+                "a fractional model must still reach TO_CHAR through the cast");
         // CUSTOMER_ACTIVATION_DATE has no column of its own on AAA_USER either: the dump reports
         // CREATED_DATE in that position, which is why the created date is rendered twice.
         assertEquals(2, countOccurrences(sql, "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP)"));

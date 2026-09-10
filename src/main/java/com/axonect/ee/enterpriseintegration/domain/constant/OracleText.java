@@ -33,10 +33,12 @@ public final class OracleText {
     /**
      * Renders one timestamp column as text under the given format model.
      *
-     * <p>The value is CAST to TIMESTAMP first: the format models used here carry fractional
-     * seconds, and TO_CHAR of a DATE with an FF element raises ORA-01821. The cast is free on a
-     * column that is already a TIMESTAMP and makes the statement independent of which of the two
-     * each column happens to be.
+     * <p>The value is CAST to TIMESTAMP first: a format model may carry fractional seconds — the
+     * table extracts' model does — and TO_CHAR of a DATE with an FF element raises ORA-01821. The
+     * cast is free on a column that is already a TIMESTAMP, and it makes the statement independent
+     * both of which of the two each column happens to be and of whether the configured model asks
+     * for a fraction, so a model can gain or lose its FF element without the expression changing
+     * shape around it.
      */
     public static String timestampAsText(String column, String format) {
         return timestampAsText(column, format, null);

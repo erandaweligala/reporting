@@ -201,7 +201,10 @@ report:
     jdbc-fetch-size: 5000        # rows Oracle ships per round trip
     query-timeout-seconds: 7200
     csv-buffer-bytes: 1048576    # 1 MB in front of the output file
-    date-format: "YYYY-MM-DD HH24:MI:SS.FF3"  # Oracle format model for every timestamp column
+    # Oracle format model for every timestamp column. No FF element: Excel has no date format for
+    # a timestamp carrying milliseconds, so it shows the date columns as serial numbers
+    # (46271.07939) instead of dates when an operator opens the dump.
+    date-format: "YYYY-MM-DD HH24:MI:SS"
     bandwidth-bucket-type: BANDWIDTH       # BUCKET_INSTANCE.BUCKET_TYPE holding PLAN_BANDWIDTH
     quota-bucket-type: DATA                # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA
     usage:
