@@ -34,11 +34,18 @@ import java.util.List;
  *
  * <p>Not every column of the dump has a column of that name on AAA_USER. SLMN has none, so the
  * username is selected in its place — the consuming system keys on it, so it is bound rather than
- * left empty; CUSTOMER_ACTIVATION_DATE is likewise reported as CREATED_DATE. NAS_IP_ADDRESS has
- * none either, and no stand-in worth binding: it lives on the CDR session documents cdr-service
- * writes to Elasticsearch, so the result set carries nothing in that position and
- * {@code UserDataDumpReportDefinition} splices the value in from the same per-user stream that
- * already produces UTLIZED_QUOTA.
+ * left empty; CUSTOMER_ACTIVATION_DATE is likewise reported as CREATED_DATE, and
+ * NOTIFICATION_TEMPLATES as TEMPLATE_ID, the column naming the templates a user's notifications
+ * are sent from. NAS_IP_ADDRESS has none either, and no stand-in worth binding: it lives on the
+ * CDR session documents cdr-service writes to Elasticsearch, so the result set carries nothing in
+ * that position and {@code UserDataDumpReportDefinition} splices the value in from the same
+ * per-user stream that already produces UTLIZED_QUOTA.
+ *
+ * <p>Each stand-in is aliased to the dump column it fills, so the select list can be read against
+ * the CSV header even though the reader indexes the result set by position. Selecting a column
+ * AAA_USER does not have — which is what NOTIFICATION_TEMPLATES was — costs the whole dump rather
+ * than the one column: Oracle rejects the statement with ORA-00904 (invalid identifier) on every
+ * shard of every run, exactly the way a version-dependent construct does.
  *
  * <p>The username range predicates are what let the dump be sharded: each shard scans a disjoint
  * slice of the username keyspace and the same slice is pushed into the Elasticsearch aggregation,
@@ -141,10 +148,11 @@ public final class UserDumpSql {
            .append("        u.NAS_PORT_TYPE, mac.ORIGINAL_MAC_ADDRESS, u.REMOTE_ID, u.REQUEST_ID,")
            .append("        u.SESSION_TIMEOUT, u.STATUS, u.SUBSCRIPTION,")
            .append("        ").append(asText("u.UPDATED_DATE", fmt, "UPDATED_DATE")).append(",")
-           // AAA_USER carries no SLMN column, so the dump reports the username under it; and no
-           // NAS_IP_ADDRESS either — that one is filled from the CDR session documents in
+           // AAA_USER carries no SLMN column, so the dump reports the username under it, and no
+           // NOTIFICATION_TEMPLATES column, so it reports TEMPLATE_ID under that name. There is no
+           // NAS_IP_ADDRESS column either — that one is filled from the CDR session documents in
            // Elasticsearch, so nothing is selected for it here.
-           .append("        u.USER_NAME AS SLMN, u.VLAN_ID, u.NOTIFICATION_TEMPLATES,")
+           .append("        u.USER_NAME AS SLMN, u.VLAN_ID, u.TEMPLATE_ID AS NOTIFICATION_TEMPLATES,")
            .append("        ").append(asText("u.CREATED_DATE", fmt, "CUSTOMER_ACTIVATION_DATE")).append(",")
            .append("        ").append(asText("svc.SERVICE_START_DATE", fmt, "BUNDLE_ACTIVATION_DATE")).append(",")
            .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")

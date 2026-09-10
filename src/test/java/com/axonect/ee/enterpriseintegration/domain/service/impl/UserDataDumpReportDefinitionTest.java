@@ -117,7 +117,8 @@ class UserDataDumpReportDefinitionTest {
         // The NAS address is spliced in from Elasticsearch, and the database columns after it
         // shift back into place rather than trailing one position short.
         assertEquals("10.20.30.40", written[30], "NAS_IP_ADDRESS");
-        assertEquals("col31", written[31], "NOTIFICATION_TEMPLATES");
+        assertEquals("col31", written[31],
+                "NOTIFICATION_TEMPLATES, which the statement fills from TEMPLATE_ID");
         assertEquals("FTTH_50Mbps", written[35], "PLAN_BANDWIDTH");
         assertEquals("107374182400", written[36], "QUOTA");
         // ...then usage is spliced in too, and the last database column follows it.

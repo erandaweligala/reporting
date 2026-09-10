@@ -13,6 +13,7 @@ make it survive that row count, and the settings an operator needs.
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
 | `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
+| `NOTIFICATION_TEMPLATES` | `AAA_USER.TEMPLATE_ID` — there is no column of that name either |
 | `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
 | `UTLIZED_QUOTA` | Elasticsearch: the user's D-1 usage on the bundle's quota bucket |
 | `CUSTOMER_ACTIVATION_DATE` | `AAA_USER.CREATED_DATE` — there is no separate activation column |
@@ -20,9 +21,14 @@ make it survive that row count, and the settings an operator needs.
 Column order is part of the contract with the consuming system and is asserted in
 `UserDataDumpReportDefinitionTest`. `UTLIZED_QUOTA` is spelled the way the consumer spells it.
 
-Three of those columns have no `AAA_USER` column of that name behind them. Two are stand-ins the
-dump statement binds in the column's place: `SLMN` carries the username, and
-`CUSTOMER_ACTIVATION_DATE` the created date. `NAS_IP_ADDRESS` has no stand-in worth binding — it
+Four of those columns have no `AAA_USER` column of that name behind them. Three are stand-ins the
+dump statement binds in the column's place, each aliased to the dump column it fills so the select
+list can still be read against the header: `SLMN` carries the username, `CUSTOMER_ACTIVATION_DATE`
+the created date, and `NOTIFICATION_TEMPLATES` the `TEMPLATE_ID` that names the templates the
+user's notifications are sent from. Selecting a `NOTIFICATION_TEMPLATES` column — which is what the
+statement did at first — costs the whole dump rather than the one column: Oracle rejects the
+statement with **ORA-00904 (invalid identifier)** on every shard of every run, the same way it
+rejects a construct its parser does not know. `NAS_IP_ADDRESS` has no stand-in worth binding — it
 is the `nasIpAddress` cdr-service records on the session document from the CDR every accounting
 event carries, so the statement selects nothing in that position and
 `UserDataDumpReportDefinition` splices the value in as it lays the row out, from the same
@@ -229,10 +235,15 @@ starting point, not a maximum.
 - `BUNDLE_ACTIVATION_DATE` is `SERVICE_INSTANCE.SERVICE_START_DATE` and `BUNDLE_DEACTIVATION_DATE`
   is `EXPIRY_DATE`; where a user has held several bundles, the one active on D-1 is reported, most
   recent first.
-- `AAA_USER` has no `SLMN`, `NAS_IP_ADDRESS` or `CUSTOMER_ACTIVATION_DATE` column, which is why
-  those three are filled as described at the top. If a column for any of them is added later,
-  selecting it is a one-line change in `UserDumpSql` — plus, for `NAS_IP_ADDRESS`, the column
-  positions in `UserDataDumpReportDefinition`, since that one shifts the result set.
+- `AAA_USER` has no `SLMN`, `NAS_IP_ADDRESS`, `CUSTOMER_ACTIVATION_DATE` or
+  `NOTIFICATION_TEMPLATES` column, which is why those four are filled as described at the top. If a
+  column for any of them is added later, selecting it is a one-line change in `UserDumpSql` — plus,
+  for `NAS_IP_ADDRESS`, the column positions in `UserDataDumpReportDefinition`, since that one
+  shifts the result set.
+- `AAA_USER.TEMPLATE_ID` is what the dump reports as `NOTIFICATION_TEMPLATES`. It is the one
+  notification-template column on the table, and the dump takes it as it stands — if the templates
+  a user holds turn out to live on a table of their own instead, this becomes a join rather than a
+  renamed column, and the column count of the statement stays the same either way.
 - The CDR session documents carry `nasIpAddress` with a `keyword` sub-field, the same shape the
   usage join already assumes of `userName`. An aggregation on a field the mapping does not have
   returns no terms rather than an error, so a wrong guess here shows up as an empty column and not
