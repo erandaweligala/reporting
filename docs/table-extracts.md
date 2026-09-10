@@ -79,9 +79,14 @@ It also makes the file independent of the JVM's locale and time zone.
 
 **A writer that stays open.** `StreamingCsvWriter` holds one buffered handle for the life of the
 extract and formats straight into it, so the file is flushed roughly once per buffer rather than
-once per batch, and values reach it exactly as the database produced them. The batch exporter's
-habit of rewriting date-looking values into an Excel formula is deliberately not carried over: a
-file consumed by another system needs the opposite.
+once per batch, and values reach it exactly as the database produced them.
+
+The extracts deliberately do not take the writer's `="..."` timestamp form, which the user data
+dump does take so that Excel displays its date columns instead of converting them to serial
+numbers (see `docs/user-data-dump.md`). These three files are loaded by another system, and their
+samples carry the milliseconds the `="..."` form normalises away — so an extract opened in Excel
+shows its date columns as serials, and that is the trade the samples ask for. Naming a timestamp
+column to the writer is what would change it, one line in `TableExtractReportDefinition`.
 
 **A bounded footprint on everything else.** An extract runs on the report executor like any other
 report, so at most `report.max-concurrent` reports are in flight and the rest queue as `Pending`.

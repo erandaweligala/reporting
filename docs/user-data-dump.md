@@ -43,14 +43,31 @@ statement does not depend on which of `DATE` and `TIMESTAMP` each column happens
 model can carry fractional seconds without raising ORA-01821 (`TO_CHAR` of a `DATE` with an `FF`
 element does).
 
-**No milliseconds, because of Excel.** The sample extract writes `yyyy-MM-dd HH:mm:ss.SSS` and this
-dump followed it, which is how the date columns came to read `46271.07939` when an operator opened
-one. A timestamp carrying milliseconds is a shape Excel has no date format for: it converts the text
-to a date serial all the same but leaves the cell in the General format, so what is displayed is the
-serial itself. Without the `FF3` the same value reads `2026-09-06 01:54:19`, as a date. The cost is
-the millisecond field — `TO_CHAR` truncates, so a stored fraction reaches the file as its whole
-second — and `date-format` is where a consumer that turns out to need it back is served, at the
-price of the serial numbers returning with it.
+**The date columns are written as `="2026-09-06 01:54:19"`, so that Excel displays them.** A CSV
+field carries no type, so Excel guesses one for every cell it opens, and a timestamp is the guess it
+gets wrong: it reads the text as a date, replaces it with the day number behind it —
+`46271.07939` — and shows the number. It is the same guess that turns an SLMN into `5.1E+09`; a
+date column is only where it is impossible to ignore.
+
+The first attempt at this was to feed the guess a better shape. The sample extract writes
+`yyyy-MM-dd HH:mm:ss.SSS` and this dump followed it, so the milliseconds were dropped from
+`date-format` on the reasoning that Excel has no date format for a fractional timestamp. The date
+columns still came out as serial numbers. There is no text shape that reads as `yyyy-MM-dd
+HH:mm:ss` and is also left alone, so what the dump does now is stop the guess instead: a field
+beginning with `=` is a formula, and `="2026-09-06 01:54:19"` is the formula whose value is that
+string. Excel shows it exactly as written and never converts it. This is the same thing the batch
+exporter behind the paged reports (`GenericCsvExporter`) has always done; the streaming reports are
+what did not have it.
+
+Two things follow from doing it in Java rather than in the format model. The rendered text is
+normalised to `yyyy-MM-dd HH:mm:ss` on the way out — a fractional seconds field is dropped — so the
+displayed format is a property of the file rather than of whichever model a deployment happens to
+carry: a `date-format` still ending in `.FF3` produces the same cell. And it is a switch, not a
+rewrite of the statement: `excel-safe-timestamps: false` writes the database's own text back for a
+consumer that reads the dump with something other than a spreadsheet, which is what it should be
+set to if that consumer chokes on the six characters around each timestamp. Nothing else about the
+file changes with it, and only the five columns the statement renders with `TO_CHAR` are affected —
+`CYCLE_DATE` is selected as it stands and is left alone.
 
 `QUOTA` is left **empty** for a bundle whose data bucket is unlimited: the consumer reads a blank
 there as "no cap", so `UserDumpSql` excludes unlimited buckets from the pivot rather than writing a
@@ -137,9 +154,10 @@ code points above U+FFFF).
 **A writer that stays open.** `StreamingCsvWriter` holds one buffered handle for the life of the
 dump and formats straight into it. The batch exporter rebuilds a multi-megabyte String per batch
 and reopens the file for every append — invisible at a few thousand rows, dominant at three
-million. Values are written exactly as the database produced them; the batch exporter's habit of
-rewriting date-looking values into an Excel formula is deliberately not carried over, since a dump
-consumed by another system needs the opposite.
+million. Values are written exactly as the database produced them, with the one exception the
+definition asks for by column: the five timestamp columns go through `ExcelSafeTimestamp`, because
+a spreadsheet does not read a CSV timestamp as one — see **The date columns** above. Every other
+column reaches the file as the database produced it.
 
 **Shards, not threads over rows.** The username keyspace is cut into contiguous ranges
 (`UserDumpShardPlanner`) that both Oracle and Elasticsearch can filter on, so each shard is a
@@ -199,7 +217,8 @@ report:
     jdbc-fetch-size: 5000
     query-timeout-seconds: 7200
     csv-buffer-bytes: 1048576
-    date-format: "YYYY-MM-DD HH24:MI:SS"   # no FF: Excel shows a fractional timestamp as a serial
+    date-format: "YYYY-MM-DD HH24:MI:SS"
+    excel-safe-timestamps: true  # write the date columns as ="..." so Excel displays them
     bandwidth-bucket-type: BANDWIDTH
     quota-bucket-type: DATA
     usage:
