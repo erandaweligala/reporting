@@ -89,8 +89,50 @@ dump never touches the index cdr-service is currently writing into.
 
 `USER_DATA_DUMP` is registered like any other report type and picked up by
 `UnifiedReportDownloadServiceImpl`, which routes it down the streaming path instead of the paged
-loop. It is produced as CSV only; requesting `EXCEL` fails fast rather than attempting a
-spreadsheet of this size.
+loop. It is produced as CSV only; requesting `EXCEL` is refused on the request itself rather than
+attempting a spreadsheet of this size.
+
+A dump is asked for and collected over the same two endpoints every other report uses. The run is
+asynchronous — `/create` returns as soon as the row is saved, and the file appears under
+`report.output.directory` when the run finishes — so the two calls are separated by however long
+the dump takes, and `/download` is the path that retrieves it.
+
+**1. Ask for the dump** — `POST /api/report-download/create`, with the caller in the `userId`
+header:
+
+```
+POST /api/report-download/create
+userId: <operator>
+Content-Type: application/json
+
+{
+  "reportType": "USER_DATA_DUMP",
+  "classificationLevel": "Open"
+}
+```
+
+`format` may be given as `"CSV"`, but it can be left out: a streaming report defaults to CSV,
+because that is the only form it has. `"EXCEL"` is rejected with a `4000` response rather than
+accepted and failed asynchronously. The response carries no id — the report's id comes from
+`POST /api/report-management/filter`, which lists the rows with their `reportStatus`
+(`Pending` → `Processing` → `Completed`, or `Failed` / `No Records`).
+
+**2. Retrieve it** — `GET /api/report-download/download?id={reportId}`, once that row reads
+`Completed`:
+
+```
+GET /api/report-download/download?id=42
+```
+
+The response is the CSV as an attachment, named after the file on disk:
+`{reportId}_USER_DATA_DUMP_{yyyy_MM_dd_HH_mm_ss}.csv`. Asked for before the run has produced a
+file, the endpoint answers `4005 Report file not found` with the report's current status, so a
+poll of `/filter` — or a retry of `/download` — is what waits for a dump out.
+
+The file is streamed off disk with `FileSystemResource`, so a multi-gigabyte dump is not held in
+heap on its way out. It is served from the directory the run wrote it to, which has to be the same
+directory the downloading instance sees: on more than one replica that means shared storage, or
+the download reaching the replica that ran the dump.
 
 ## Settings
 

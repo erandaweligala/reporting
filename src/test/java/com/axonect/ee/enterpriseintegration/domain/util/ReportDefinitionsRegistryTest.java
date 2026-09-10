@@ -1,6 +1,7 @@
 package com.axonect.ee.enterpriseintegration.domain.util;
 
 import com.axonect.ee.enterpriseintegration.domain.service.ReportDefinition;
+import com.axonect.ee.enterpriseintegration.domain.service.StreamingReportDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -27,6 +28,25 @@ class ReportDefinitionsRegistryTest {
                 ReportDefinitionsRegistry.getDefinition("TEST_REPORT");
 
         assertSame(definition, result);
+    }
+
+    @Test
+    void isStreaming_whenDefinitionStreams_shouldBeTrue() {
+        ReportDefinitionsRegistry.register("STREAMING_REPORT", mock(StreamingReportDefinition.class));
+
+        assertTrue(ReportDefinitionsRegistry.isStreaming("STREAMING_REPORT"));
+    }
+
+    @Test
+    void isStreaming_whenDefinitionIsPaged_shouldBeFalse() {
+        ReportDefinitionsRegistry.register("PAGED_REPORT", mock(ReportDefinition.class));
+
+        assertFalse(ReportDefinitionsRegistry.isStreaming("PAGED_REPORT"));
+    }
+
+    @Test
+    void isStreaming_whenNotRegistered_shouldBeFalse() {
+        assertFalse(ReportDefinitionsRegistry.isStreaming("UNKNOWN_REPORT"));
     }
 
     @Test

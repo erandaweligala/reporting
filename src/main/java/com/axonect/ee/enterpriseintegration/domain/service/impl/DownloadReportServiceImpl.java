@@ -71,6 +71,11 @@ public class DownloadReportServiceImpl implements DownloadReportService {
             log.info(LoggingAdviceConstants.REQUEST_TERMINATED, System.currentTimeMillis() - startTime, "Success");
             return new CommonAdaptorResp<>(true, ResponseCodeEnum.CREATE_SUCCESS.message());
 
+        } catch (BaseException ex) {
+            // A rejected request — an unknown format, or a spreadsheet asked of a CSV-only
+            // report. Its own code and message are the useful answer, so let it through.
+            log.warn("Rejected download report request: {}", ex.getMessage());
+            throw ex;
         } catch (Exception ex) {
             log.error(String.valueOf(ResponseCodeEnum.LOG_NOT_CONNECTED), System.currentTimeMillis() - startTime,
                     ex.getMessage(), StackTraceTracker.displayStackStraceArray(ex.getStackTrace()));

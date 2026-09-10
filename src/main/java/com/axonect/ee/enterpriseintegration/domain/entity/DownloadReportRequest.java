@@ -19,6 +19,11 @@ public class DownloadReportRequest {
     @NotNull(message ="Report Type is mandatory")
     private String reportType ;
     private String classificationLevel;
+    /**
+     * CSV or EXCEL. Optional — left out, a paged report is produced as EXCEL as before and a
+     * streaming report (USER_DATA_DUMP) as CSV, which is the only format it has.
+     */
+    private String format;
     private List<FilterValue> filterValues;
 
 }
