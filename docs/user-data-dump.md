@@ -15,17 +15,17 @@ that make it survive that row count, and the settings an operator needs.
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
 | `NOTIFICATION_TEMPLATES` | `AAA_USER.TEMPLATE_ID` — there is no column of that name either |
 | `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
-| `UTLIZED_QUOTA` | Elasticsearch: everything the reported bundle has drawn from its quota bucket, summed over every CDR index up to D-1 |
-| `CUSTOMER_ACTIVATION_DATE` | `AAA_USER.CREATED_DATE` — there is no separate activation column |
+| `UTLIZED_QUOTA` | Elasticsearch: everything the reported bundle has drawn from its quota bucket, summed over every CDR index the cluster holds — today's included |
+| `CUSTOMER_ACTIVATION_DATE` | `AAA_USER.ACTIVATION_DATE` |
 
 Column order is part of the contract with the consuming system and is asserted in
 `UserDataDumpReportDefinitionTest`. `UTLIZED_QUOTA` is spelled the way the consumer spells it.
 
-Four of those columns have no `AAA_USER` column of that name behind them. Three are stand-ins the
+Three of those columns have no `AAA_USER` column of that name behind them. Two are stand-ins the
 dump statement binds in the column's place, each aliased to the dump column it fills so the select
-list can still be read against the header: `SLMN` carries the username, `CUSTOMER_ACTIVATION_DATE`
-the created date, and `NOTIFICATION_TEMPLATES` the `TEMPLATE_ID` that names the templates the
-user's notifications are sent from. Selecting a `NOTIFICATION_TEMPLATES` column — which is what the
+list can still be read against the header: `SLMN` carries the username, and
+`NOTIFICATION_TEMPLATES` the `TEMPLATE_ID` that names the templates the user's notifications are
+sent from. Selecting a `NOTIFICATION_TEMPLATES` column — which is what the
 statement did at first — costs the whole dump rather than the one column: Oracle rejects the
 statement with **ORA-00904 (invalid identifier)** on every shard of every run, the same way it
 rejects a construct its parser does not know. `NAS_IP_ADDRESS` has no stand-in worth binding — it
@@ -80,15 +80,29 @@ what the bundle has drawn from that bucket. It used to be one day of it — the 
 D-1 index and nothing else, so a subscriber a fortnight into a 100 GB bundle was reported as having
 used whatever they happened to move on Tuesday. Two things make it a total instead.
 
-**Every index up to the reported day, not just that day's.** cdr-service keeps no running total to
-read: each accounting event it consumes carries a cumulative `totalUsage`, and what it stores on
-the session document is the *difference* from the event before it, tagged with the `bucketId` it
-was drawn from. A total is therefore something the dump sums, and the days it sums over are every
-daily index the cluster still holds. The guarantee that a dump never reads the index cdr-service is
-writing into is kept the only way it can be once the scan is no longer a single named day: the days
-after the reported one are struck out of the wildcard by name (`radius-sessions-*`,
-`-radius-sessions-2026.09.11`). `usage.lookback-days` bounds the scan to a fixed number of days for
-a cluster that keeps years of them.
+**Every index the cluster holds, today's included.** cdr-service keeps no running total to read:
+each accounting event it consumes carries a cumulative `totalUsage`, and what it stores on the
+session document is the *difference* from the event before it, tagged with the `bucketId` it was
+drawn from. A total is therefore something the dump sums, and the days it sums over are every daily
+index the cluster still holds — `radius-sessions-*`, nothing struck out of it.
+
+Widening the scan to D-1 and no further was the first attempt at that, and it kept a guarantee that
+turned out to cost the column: the days after the reported one, today's hot index among them, were
+excluded by name so that a dump never read what cdr-service was writing into. A subscriber whose
+bundle was taken out this morning has drawn *all* of what they have drawn from that index. Excluded,
+they are not a row reporting zero — they are a user the aggregation never returns at all, so both
+Elasticsearch-filled columns come out **empty**:
+
+```
+BUNDLE_NAME          QUOTA   UTLIZED_QUOTA   NAS_IP_ADDRESS
+Unlimited 50 (90 D)                                          ← usage recorded today, none reported
+```
+
+Aggregating a live index costs the cluster a search, which is what every other day of the scan
+costs it too; a total read next to `QUOTA` is worth more than the guarantee was. The reported day
+still bounds what it should — which bundle is reported, and which day's `NAS_IP_ADDRESS` sits
+beside the total. `usage.lookback-days` bounds the scan to a fixed number of days, ending today,
+for a cluster that keeps years of them.
 
 One thing a wider scan does depend on that a single-index one did not: every index it reads has to
 map `sessionInstances` the same way. A `nested` aggregation over an index where that field is a
@@ -123,6 +137,29 @@ A shard reporting 0 there is a deployment whose CDRs do not key usage the way th
 `NAS_IP_ADDRESS` comes out of the same pass and is **not** a lifetime figure — it is still the NAS
 that day's sessions were anchored to. It is read inside a filter on the reported day's own index,
 so widening the usage around it left it exactly where it was.
+
+## Reading an empty or zero `UTLIZED_QUOTA`
+
+The two look alike in a spreadsheet and mean different things, and neither can be told from the
+other in the file — so each shard counts them:
+
+```
+Shard [f .. s) found no CDR usage at all for 12 of 748210 user(s) — UTLIZED_QUOTA and
+NAS_IP_ADDRESS are empty for those — and found 3 more holding a quota bucket their CDRs never
+name, whose UTLIZED_QUOTA is 0
+```
+
+**Empty** is a user the aggregation never returned: no session document under that username in any
+index the scan covered. `NAS_IP_ADDRESS` is empty beside it, which is what tells the two apart at a
+glance. One such user is a subscriber who has never held a session; a shard reporting most of its
+users here is reporting that `userName` on the CDR documents is not `AAA_USER.USER_NAME` — or that
+the scan is not covering the days the sessions are in.
+
+**0** is a user who was found, holding a quota bucket that none of their session instances name.
+One such user has not touched that bucket. A shard reporting most of its users here is reporting
+that the id the CDR keys usage on is not the `BUCKET_INSTANCE.BUCKET_ID` the dump statement reads —
+a `bucketId` that looks like a row id rather than a plan's bucket name is the tell — and the figure
+is a zero only because the lookup missed, not because nothing was drawn.
 
 ## How a run is shaped
 
@@ -193,7 +230,7 @@ in step (`UserUsageCursor`). Per-user lookups would be three million Elasticsear
 pre-built map would cost a full aggregation scan and hundreds of megabytes before the first row
 could be written. Instead nothing is held except the row being written and the aggregation page
 being drained, so heap use is flat regardless of user count and the two scans overlap. Usage comes
-from a composite aggregation over the `radius-sessions-yyyy.MM.dd` indices up to D-1 — one number
+from a composite aggregation over every `radius-sessions-yyyy.MM.dd` index — one number
 per user per bucket, and one more per bundle that drew on it, over the wire, paged through
 `after_key`, with no scroll context left open on the cluster. Widening the index expression does
 not widen the response: a terms aggregation returns the buckets and services that exist, which for
@@ -219,8 +256,8 @@ carries the header — and later shards write parts that are appended with `File
 inside the file system rather than through the heap. Shards run on their own pool
 (`userDumpExecutor`) so a dump cannot starve the other reports of their slots.
 
-Elasticsearch is only aggregated, never queried for hits, and every index after D-1 is excluded by
-name — the dump never touches the index cdr-service is currently writing into.
+Elasticsearch is only aggregated, never queried for hits — a search over the daily indices,
+today's included, with no scroll context and no write of any kind.
 
 ## Running one
 
@@ -278,7 +315,7 @@ report:
       enabled: true
       index: radius-sessions     # cdr-service `sessions-data`
       page-size: 2000
-      lookback-days: 0           # 0 = every daily index the cluster holds; the total's window
+      lookback-days: 0           # 0 = every daily index the cluster holds; else N days ending today
       buckets-per-user: 20
       scope-to-service: true     # UTLIZED_QUOTA is the reported bundle's share of its bucket
       services-per-user: 10      # bundles weighed against one of a user's buckets
@@ -292,10 +329,11 @@ report:
 `NAS_IP_ADDRESS` — empty rather than failing the run.
 
 `usage.lookback-days` and `usage.scope-to-service` are the two knobs behind the total — see
-**What `UTLIZED_QUOTA` is the total of** above. A positive `lookback-days` adds one index name to
-the search per day it covers, so a window of several hundred days belongs to the wildcard (0)
-rather than to a list; `scope-to-service: false` is what a deployment whose CDRs do not carry
-`SERVICE_INSTANCE.ID` should be set to, and the per-shard log line says whether it is one.
+**What `UTLIZED_QUOTA` is the total of** above. A positive `lookback-days` names that many daily
+indices ending with today's and adds one index name to the search per day it covers, so a window of
+several hundred days belongs to the wildcard (0) rather than to a list; `scope-to-service: false`
+is what a deployment whose CDRs do not carry `SERVICE_INSTANCE.ID` should be set to, and the
+per-shard log line says whether it is one.
 
 `usage.nested` must describe how `sessionInstances` is actually mapped. Mapped as `nested`, usage
 can be summed per bucket. Mapped as a plain object, Elasticsearch flattens the array and a

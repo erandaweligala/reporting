@@ -334,6 +334,31 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
+    void anAbsentUserReportsAnEmptyColumnAndAnUnknownBucketAZero() throws Exception {
+        // The two look alike in the file and are not the same thing, which is why the shard log
+        // counts them separately: a user Elasticsearch never returned — everything they drew is
+        // outside the scan, or their username is not what the CDRs are keyed on — against one it
+        // did return, holding a quota bucket none of their session instances name.
+        stubReader(List.of(
+                databaseRow("absentuser", "FTTH_50Mbps", "1024", "DATA_1"),
+                databaseRow("knownuser", "FTTH_50Mbps", "1024", "DATA_1"),
+                databaseRow("wrongbucketuser", "FTTH_50Mbps", "1024", "DATA_9")));
+        stubUsage(Map.of(
+                "knownuser", Map.of("DATA_1", 500L),
+                "wrongbucketuser", Map.of("DATA_1", 700L)));
+
+        Path output = outputWithHeader("coverage.csv");
+        assertEquals(3, definition.streamTo(report(), output));
+
+        List<String> lines = Files.readAllLines(output);
+        assertEquals("", lines.get(1).split(",", -1)[37],
+                "absentuser is not in the aggregation at all, so the column is empty");
+        assertEquals("500", lines.get(2).split(",", -1)[37], "knownuser's own bucket");
+        assertEquals("0", lines.get(3).split(",", -1)[37],
+                "wrongbucketuser holds a bucket their CDRs never name, which reads as a zero");
+    }
+
+    @Test
     void rendersEveryTimestampColumnUnderTheOneConfiguredModel() throws Exception {
         // The shipped model, pinned here rather than left to whoever next edits application.yml.
         // It is not what makes the dump readable in a spreadsheet — see the test below for that —

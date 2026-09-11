@@ -34,12 +34,11 @@ import java.util.List;
  *
  * <p>Not every column of the dump has a column of that name on AAA_USER. SLMN has none, so the
  * username is selected in its place — the consuming system keys on it, so it is bound rather than
- * left empty; CUSTOMER_ACTIVATION_DATE is likewise reported as CREATED_DATE, and
- * NOTIFICATION_TEMPLATES as TEMPLATE_ID, the column naming the templates a user's notifications
- * are sent from. NAS_IP_ADDRESS has none either, and no stand-in worth binding: it lives on the
- * CDR session documents cdr-service writes to Elasticsearch, so the result set carries nothing in
- * that position and {@code UserDataDumpReportDefinition} splices the value in from the same
- * per-user stream that already produces UTLIZED_QUOTA.
+ * left empty; NOTIFICATION_TEMPLATES is reported as TEMPLATE_ID, the column naming the templates
+ * a user's notifications are sent from. NAS_IP_ADDRESS has none either, and no stand-in worth
+ * binding: it lives on the CDR session documents cdr-service writes to Elasticsearch, so the
+ * result set carries nothing in that position and {@code UserDataDumpReportDefinition} splices the
+ * value in from the same per-user stream that already produces UTLIZED_QUOTA.
  *
  * <p>The statement ends with two columns that are not part of the dump at all — the quota bucket's
  * id and the id of the SERVICE_INSTANCE holding it. Neither is written to the CSV; they are what
@@ -198,10 +197,9 @@ public final class UserDumpSql {
      * <p>The name is passed to {@link OracleText} rather than written into {@code column}: in the
      * column it would land inside the CAST and take the whole statement down with ORA-00907 — see
      * {@link OracleText#timestampAsText(String, String, String)}. Naming them is worth the care.
-     * Five of these expressions have no name of their own, two of them render the very same
-     * column into different dump columns, and the statement is read in the log after the database
-     * has rejected it, where a TO_CHAR that says which dump column it fills is the difference
-     * between reading the statement and counting the select list.
+     * Five of these expressions have no name of their own, and the statement is read in the log
+     * after the database has rejected it, where a TO_CHAR that says which dump column it fills is
+     * the difference between reading the statement and counting the select list.
      */
     private static String asText(String column, String format, String alias) {
         return OracleText.timestampAsText(column, format, alias);

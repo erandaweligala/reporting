@@ -57,31 +57,34 @@ class UsageAggregationClientTest {
     }
 
     @Test
-    void sumsEveryIndexUpToTheReportedDayRatherThanThatDayAlone() {
+    void sumsEveryIndexTheClusterHoldsRatherThanStoppingAtTheReportedDay() {
         // UTLIZED_QUOTA is read next to QUOTA, the bucket's whole allowance, so the usage beside
-        // it has to be everything drawn from the bucket — not the slice of it that fell on D-1.
+        // it has to be everything drawn from the bucket — not the slice of it that fell on D-1,
+        // and not everything up to D-1 either. Striking the later days out of the wildcard is
+        // what reported a subscriber whose sessions all started today as having no usage at all.
         properties.setTimezone("UTC");
-        LocalDate yesterday = LocalDate.now(ZoneId.of("UTC")).minusDays(1);
+        LocalDate today = LocalDate.now(ZoneId.of("UTC"));
 
-        List<String> indices = client.indicesUpTo(yesterday);
+        List<String> indices = client.indicesThroughToday();
 
-        assertEquals("radius-sessions-*", indices.get(0),
-                "every daily index the cluster still holds is in scope");
-        assertTrue(indices.contains("-" + client.indexFor(yesterday.plusDays(1))),
-                "the index cdr-service is writing into now is struck out of the wildcard by name");
-        assertFalse(indices.contains("-" + client.indexFor(yesterday)),
-                "the reported day is the last one included, not an excluded one");
+        assertEquals(List.of("radius-sessions-*"), indices,
+                "every daily index the cluster still holds is in scope, today's included");
+        assertFalse(indices.contains("-" + client.indexFor(today)),
+                "the index cdr-service is writing into carries this morning's usage, so the "
+                        + "total has to read it rather than strike it out by name");
     }
 
     @Test
     void aBoundedLookbackNamesItsOwnDaysInsteadOfTheWildcard() {
+        properties.setTimezone("UTC");
         properties.getUsage().setLookbackDays(3);
+        LocalDate today = LocalDate.now(ZoneId.of("UTC"));
 
-        assertEquals(List.of("radius-sessions-2026.08.20",
-                        "radius-sessions-2026.08.21",
-                        "radius-sessions-2026.08.22"),
-                client.indicesUpTo(LocalDate.of(2026, 8, 22)),
-                "oldest first, ending at the reported day");
+        assertEquals(List.of(client.indexFor(today.minusDays(2)),
+                        client.indexFor(today.minusDays(1)),
+                        client.indexFor(today)),
+                client.indicesThroughToday(),
+                "oldest first, ending today rather than at the reported day");
     }
 
     @Test
@@ -94,8 +97,8 @@ class UsageAggregationClientTest {
         assertEquals("nasIpAddress.keyword", properties.getUsage().getNasIpField(),
                 "the field cdr-service records the address under on the session document");
         assertTrue(UsageAggregationClient.aggregationNames().contains("reported_day"),
-                "the usage around it now sums every index, so the address is read inside a "
-                        + "filter that keeps NAS_IP_ADDRESS the reported day's");
+                "the usage around it sums every index the cluster holds, so the address is read "
+                        + "inside a filter that keeps NAS_IP_ADDRESS the reported day's");
     }
 
     @Test
@@ -107,7 +110,7 @@ class UsageAggregationClientTest {
                 "on by default: without it a recurring subscriber's every cycle would be "
                         + "reported against the current cycle's QUOTA");
         assertEquals(0, properties.getUsage().getLookbackDays(),
-                "0 is every index the cluster holds, which is what a lifetime total means");
+                "0 is every index the cluster holds, which is what a running total means");
     }
 
     @Test
