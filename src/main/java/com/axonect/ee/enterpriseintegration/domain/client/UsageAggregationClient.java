@@ -7,6 +7,7 @@ import co.elastic.clients.elasticsearch._types.aggregations.Aggregation;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeAggregationSource;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeBucket;
 import co.elastic.clients.elasticsearch._types.aggregations.StringTermsBucket;
+import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.json.JsonData;
@@ -43,6 +44,15 @@ import java.util.Map;
  * names the days it must not read — the index cdr-service is writing into now is excluded by name,
  * so a dump never touches the hot index however wide the rest of the scan is.
  *
+ * <p>Not every {@code usage} in those arrays is volume. The CDR computes each delta by
+ * subtracting one 32-bit RADIUS counter reading from an earlier one, so a counter that went
+ * backwards — a NAS re-syncing, a rating correction — leaves a small negative that reaches the
+ * index wrapped, as a number just under 2<sup>32</sup>: a regression of 10 bytes is stored as
+ * 4294967286, and summed into UTLIZED_QUOTA it reads as 4.29 GB the subscriber never drew.
+ * cdr-service no longer writes them, but the indices already written keep theirs until retention
+ * rolls them away, so the sums here are taken over the instances that pass {@code drawnUsage}
+ * rather than over everything the array holds.
+ *
  * <p>Usage is summed with a composite aggregation rather than fetched as hits: for 3 million users
  * the hits would be tens of millions of documents over the wire, whereas the aggregation ships one
  * number per user per bucket and pages deterministically through {@code after_key} with no scroll
@@ -67,6 +77,7 @@ public class UsageAggregationClient {
     private static final String AGG_BY_BUCKET = "by_bucket";
     private static final String AGG_BY_SERVICE = "by_service";
     private static final String AGG_USAGE = "usage";
+    private static final String AGG_DRAWN = "drawn";
     private static final String AGG_REPORTED_DAY = "reported_day";
     private static final String AGG_NAS_IP = "nas_ip";
     private static final String USERNAME_FIELD = "userName.keyword";
@@ -74,6 +85,8 @@ public class UsageAggregationClient {
     private static final String INDEX_FIELD = "_index";
     /** Excluded from an index expression, so the scan stops short of a day it must not read. */
     private static final String EXCLUDE = "-";
+    /** Where a 32-bit counter rolls over, and so what a wrapped-negative usage was subtracted from. */
+    private static final long COUNTER_WRAP = 1L << 32;
 
     private final ObjectProvider<ElasticsearchClient> clientProvider;
     private final UserDumpProperties properties;
@@ -256,9 +269,11 @@ public class UsageAggregationClient {
                 // Without a nested mapping Elasticsearch flattens the instance array, so a
                 // per-bucket sum would credit every bucket with the whole session's usage. Sum
                 // everything the user drew instead and report it as unattributed.
-                return Map.of(
-                        AGG_USAGE, Aggregation.of(a -> a.sum(s -> s.field(usageField))),
-                        AGG_REPORTED_DAY, reportedDay());
+                Aggregation flatTotal = new Aggregation.Builder()
+                        .filter(drawnUsage(usageField, config.getWrapWindow()))
+                        .aggregations(AGG_USAGE, u -> u.sum(s -> s.field(usageField)))
+                        .build();
+                return Map.of(AGG_DRAWN, flatTotal, AGG_REPORTED_DAY, reportedDay());
             }
 
             Aggregation byBucket = new Aggregation.Builder()
@@ -266,9 +281,14 @@ public class UsageAggregationClient {
                     .aggregations(bucketTotals(instancesPath, usageField))
                     .build();
 
+            Aggregation drawn = new Aggregation.Builder()
+                    .filter(drawnUsage(usageField, config.getWrapWindow()))
+                    .aggregations(AGG_BY_BUCKET, byBucket)
+                    .build();
+
             Aggregation instances = new Aggregation.Builder()
                     .nested(n -> n.path(instancesPath))
-                    .aggregations(AGG_BY_BUCKET, byBucket)
+                    .aggregations(AGG_DRAWN, drawn)
                     .build();
 
             return Map.of(AGG_INSTANCES, instances, AGG_REPORTED_DAY, reportedDay());
@@ -328,12 +348,14 @@ public class UsageAggregationClient {
             String nasIpAddress = nasIpAddressOf(bucket);
 
             if (!config.isNested()) {
-                double total = bucket.aggregations().get(AGG_USAGE).sum().value();
+                double total = bucket.aggregations().get(AGG_DRAWN).filter()
+                        .aggregations().get(AGG_USAGE).sum().value();
                 return new UserUsage(userName, noBuckets(), noBuckets(), (long) total, false, nasIpAddress);
             }
 
             List<StringTermsBucket> bucketTerms = bucket.aggregations()
                     .get(AGG_INSTANCES).nested()
+                    .aggregations().get(AGG_DRAWN).filter()
                     .aggregations().get(AGG_BY_BUCKET).sterms()
                     .buckets().array();
 
@@ -392,9 +414,51 @@ public class UsageAggregationClient {
         }
     }
 
+    /**
+     * Matches the instances whose usage is volume the subscriber drew, so the totals summed
+     * inside it are taken over those alone.
+     *
+     * <p>What it excludes is a usage figure that reached the index as a wrapped negative. The
+     * CDR's per-event usage was computed by subtracting one 32-bit RADIUS counter reading from an
+     * earlier one, and when that counter went backwards the difference came out the far side of
+     * 2<sup>32</sup>: a regression of 10 bytes is indexed as 4294967286. Left in the sum each one
+     * adds 4.29 GB to UTLIZED_QUOTA. cdr-service stops writing them, but every index already
+     * written still holds its own for as long as retention keeps it, so the dump reads past them
+     * rather than reporting a column that stays wrong until those days age out.
+     *
+     * <p>Only the band immediately below the roll-over is excluded, together with anything
+     * negative. A figure above 2<sup>32</sup> cannot be a 32-bit wrap — it is a session that
+     * genuinely moved more than 4.29 GB — and is summed exactly as it stands.
+     *
+     * <p>Inside the nested aggregation each instance is its own Lucene document, so this selects
+     * instances one at a time. On the flattened mapping there are no instance documents to select
+     * and it can only keep or drop a whole session — still the better of the two errors, since
+     * what it drops alongside is small next to the 4.29 GB it takes out.
+     *
+     * <p>A {@code window} of 0 or less matches everything, which is the dump summing the indices
+     * exactly as they stand.
+     */
+    static Query drawnUsage(String usageField, long window) {
+        if (window <= 0) {
+            return Query.of(q -> q.matchAll(m -> m));
+        }
+        long floor = COUNTER_WRAP - window;
+        Query wrapped = Query.of(n -> n.range(r -> r.field(usageField)
+                .gt(JsonData.of(floor))
+                .lt(JsonData.of(COUNTER_WRAP))));
+        Query negative = Query.of(n -> n.range(r -> r.field(usageField)
+                .lt(JsonData.of(0L))));
+        return Query.of(q -> q.bool(b -> b.mustNot(List.of(wrapped, negative))));
+    }
+
+    /** Exposed for tests: where a 32-bit counter rolls over. */
+    static long counterWrap() {
+        return COUNTER_WRAP;
+    }
+
     /** Exposed for tests: the aggregation names this client reads back. */
     static List<String> aggregationNames() {
-        return new ArrayList<>(List.of(AGG_BY_USER, AGG_INSTANCES, AGG_BY_BUCKET, AGG_BY_SERVICE,
-                AGG_USAGE, AGG_REPORTED_DAY, AGG_NAS_IP));
+        return new ArrayList<>(List.of(AGG_BY_USER, AGG_INSTANCES, AGG_DRAWN, AGG_BY_BUCKET,
+                AGG_BY_SERVICE, AGG_USAGE, AGG_REPORTED_DAY, AGG_NAS_IP));
     }
 }

@@ -245,6 +245,16 @@ report:
       nas-ip-field: nasIpAddress.keyword
       nested: true               # sessionInstances is mapped as a nested type
       instances-path: sessionInstances
+      # How far below 2^32 an instance's usage may land before the dump reads it as a 32-bit
+      # counter that went backwards rather than as volume, and leaves it out of UTLIZED_QUOTA.
+      # RADIUS counts volume in 32-bit counters, so a usage the CDR derived by subtraction and
+      # came out negative arrives wrapped — a 10 byte regression is indexed as 4294967286, which
+      # is 4.29 GB of usage nobody drew. cdr-service keeps these out of the index now; this is
+      # what keeps the ones already written out of the column. Only the band just below the
+      # roll-over is excluded, so a session that really moved tens of gigabytes still reports all
+      # of it. 0 sums the indices exactly as they stand — the setting to reach for once no index
+      # in the retention window predates the cdr-service fix.
+      wrap-window: 1073741824    # 1 GiB
 
 # Elasticsearch cluster holding the CDR session documents, read by the user data dump.
 elasticsearch:

@@ -1,6 +1,8 @@
 package com.axonect.ee.enterpriseintegration.domain.client;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch._types.query_dsl.Query;
+import co.elastic.clients.elasticsearch._types.query_dsl.RangeQuery;
 import com.axonect.ee.enterpriseintegration.application.config.UserDumpProperties;
 import com.axonect.ee.enterpriseintegration.domain.exception.ReportClientException;
 import org.junit.jupiter.api.BeforeEach;
@@ -108,6 +110,62 @@ class UsageAggregationClientTest {
                         + "reported against the current cycle's QUOTA");
         assertEquals(0, properties.getUsage().getLookbackDays(),
                 "0 is every index the cluster holds, which is what a lifetime total means");
+    }
+
+    @Test
+    void leavesTheWrappedCountersAlreadyInTheIndicesOutOfTheTotal() {
+        // 4294967286 is 2^32 - 10: a 10 byte counter regression the CDR wrapped on the way in.
+        // Summed as volume it is 4.29 GB the subscriber never drew, and the indices written
+        // before cdr-service stopped producing them still hold theirs.
+        long window = properties.getUsage().getWrapWindow();
+        Query filter = UsageAggregationClient.drawnUsage("sessionInstances.usage", window);
+
+        List<Query> excluded = filter.bool().mustNot();
+        assertEquals(2, excluded.size(), "the wrapped band, and anything outright negative");
+
+        RangeQuery wrapped = excluded.get(0).range();
+        assertEquals("sessionInstances.usage", wrapped.field());
+        assertEquals(UsageAggregationClient.counterWrap() - window, wrapped.gt().to(Long.class),
+                "the band starts one window below the roll-over");
+        assertEquals(UsageAggregationClient.counterWrap(), wrapped.lt().to(Long.class),
+                "and stops at it, so the reported 4294967286 falls inside");
+        assertTrue(4294967286L > wrapped.gt().to(Long.class)
+                        && 4294967286L < wrapped.lt().to(Long.class),
+                "the value from the report is excluded by this band");
+
+        assertEquals(0L, excluded.get(1).range().lt().to(Long.class),
+                "a negative usage would subtract from a total it was never part of");
+    }
+
+    @Test
+    void stillSumsEveryByteOfASessionThatGenuinelyMovedMoreThanFourGigabytes() {
+        Query filter = UsageAggregationClient.drawnUsage("sessionInstances.usage",
+                properties.getUsage().getWrapWindow());
+        RangeQuery wrapped = filter.bool().mustNot().get(0).range();
+
+        // Above the roll-over is not a wrap — nothing subtracted from 2^32 can land there.
+        assertTrue(12_000_000_000L > wrapped.lt().to(Long.class),
+                "12 GB is past the band's upper edge, so the filter keeps it");
+        assertTrue(3_000_000_000L < wrapped.gt().to(Long.class),
+                "and 3 GB in one accounting event is below its lower edge");
+    }
+
+    @Test
+    void theWrapWindowCanBeTurnedOffOnceNoIndexPredatesTheFix() {
+        Query filter = UsageAggregationClient.drawnUsage("sessionInstances.usage", 0L);
+
+        assertTrue(filter.isMatchAll(),
+                "with the window at 0 the dump sums the indices exactly as they stand");
+    }
+
+    @Test
+    void sumsTheUsageInsideTheFilterRatherThanBesideIt() {
+        assertTrue(UsageAggregationClient.aggregationNames().contains("drawn"),
+                "the bucket totals sit under the filter, so a wrapped instance is out of every "
+                        + "figure the dump reports rather than only out of one of them");
+        assertEquals(1L << 30, properties.getUsage().getWrapWindow(),
+                "1 GiB by default: a regression of more than that in one accounting event is "
+                        + "less likely than a subscriber moving 3.22 GB between two of them");
     }
 
     @Test

@@ -169,6 +169,28 @@ public class UserDumpProperties {
         private String instancesPath = "sessionInstances";
 
         /**
+         * How far below 2<sup>32</sup> an instance's usage may land before the dump reads it as a
+         * counter that went backwards rather than as volume, and leaves it out of UTLIZED_QUOTA.
+         *
+         * <p>RADIUS carries volume in 32-bit counters, so a usage figure that was computed as a
+         * difference upstream and came out negative arrives wrapped: a regression of 10 bytes
+         * reaches the index as 4294967286. Summed into UTLIZED_QUOTA that is 4.29 GB the
+         * subscriber never drew, and one such instance is enough to make the column nonsense.
+         * cdr-service now keeps them out of the index, but the indices already written still hold
+         * them, and they stay readable until retention rolls them away — so the dump has to
+         * recognise them too rather than wait the problem out.
+         *
+         * <p>Only the band immediately below 2<sup>32</sup> is excluded. A figure above the
+         * roll-over is not a wrap and is summed as it stands, so a session that really moved tens
+         * of gigabytes still reports every byte of it.
+         *
+         * <p>The default is 1 GiB, which reads anything above ~3.22 GB in a single accounting
+         * event as a regression. Set it to 0 to sum the indices exactly as they are, which is
+         * what to do once no index in the retention window predates the cdr-service fix.
+         */
+        private long wrapWindow = 1L << 30;
+
+        /**
          * Set false to emit an empty UTLIZED_QUOTA and NAS_IP_ADDRESS instead of querying
          * Elasticsearch.
          */

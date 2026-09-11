@@ -15,7 +15,7 @@ that make it survive that row count, and the settings an operator needs.
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
 | `NOTIFICATION_TEMPLATES` | `AAA_USER.TEMPLATE_ID` — there is no column of that name either |
 | `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
-| `UTLIZED_QUOTA` | Elasticsearch: everything the reported bundle has drawn from its quota bucket, summed over every CDR index up to D-1 |
+| `UTLIZED_QUOTA` | Elasticsearch: everything the reported bundle has drawn from its quota bucket, summed over every CDR index up to D-1, less any instance whose usage is a 32-bit counter regression |
 | `CUSTOMER_ACTIVATION_DATE` | `AAA_USER.CREATED_DATE` — there is no separate activation column |
 
 Column order is part of the contract with the consuming system and is asserted in
@@ -123,6 +123,42 @@ A shard reporting 0 there is a deployment whose CDRs do not key usage the way th
 `NAS_IP_ADDRESS` comes out of the same pass and is **not** a lifetime figure — it is still the NAS
 that day's sessions were anchored to. It is read inside a filter on the reported day's own index,
 so widening the usage around it left it exactly where it was.
+
+## Why some instances are left out of the sum
+
+Not every `usage` on a session instance is volume. RADIUS counts bytes in `Acct-Input-Octets` and
+`Acct-Output-Octets`, which are 32-bit — the whole reason `Acct-Input-Gigawords` exists — and each
+instance's figure is a *difference* between two readings of them. When the counter behind that
+subtraction goes backwards, and it does (a NAS re-syncing mid-session, a rating correction, a
+bucket refund), the difference is taken in 32-bit arithmetic and a small negative comes out the
+far side of 2³². A regression of ten bytes is indexed as **4294967286**.
+
+Summed as volume that one instance is 4.29 GB nobody drew. It is what a session like this reports,
+where the subscriber moved ten bytes and the column read 8.59 GB:
+
+| message | `totalUsage` | `sessionUsage` | stored `usage` |
+|---|---|---|---|
+| `ACCOUNTING_START` | 0 | 0 | 0 |
+| `ACCOUNTING_INTERIM` | 10 | 10 | 10 |
+| `ACCOUNTING_INTERIM` | 0 | 4294967286 | **4294967286** |
+| `ACCOUNTING_INTERIM` | 4294967286 | 4294967286 | **4294967286** |
+
+Two places let it through, and both are fixed. cdr-service derives each instance's usage as a
+delta and had a guard for a counter that went backwards — but the guard tested for a *negative*,
+and a wrapped value arrives positive and enormous, so it sailed past; worse, the fallback the
+guard chose was the payload's own `sessionUsage`, which is computed by the same upstream in the
+same 32-bit arithmetic and is the field most likely to be carrying the wrap. cdr-service now
+recognises the wrap on both paths and records 0 for an event whose counter regressed, since an
+event that drew nothing is what that describes.
+
+That stops new ones. It does nothing for the indices already written, which keep theirs until
+retention rolls them away — so the dump does not sum an instance whose usage falls in the band
+just below 2³². `usage.wrap-window` is how wide that band is, 1 GiB by default, which reads
+anything above ~3.22 GB in a single accounting event as a regression rather than as volume. Only
+that band is excluded: a figure *above* the roll-over cannot be a 32-bit wrap, so a session that
+genuinely moved twelve gigabytes still reports every byte. Set it to 0 once no index in the
+retention window predates the cdr-service fix, and the dump sums the indices exactly as they
+stand.
 
 ## How a run is shaped
 
@@ -286,6 +322,7 @@ report:
       nas-ip-field: nasIpAddress.keyword
       nested: true
       instances-path: sessionInstances
+      wrap-window: 1073741824    # 1 GiB; band below 2^32 read as a counter regression, not volume
 ```
 
 `usage.enabled: false` leaves both Elasticsearch-filled columns — `UTLIZED_QUOTA` and
@@ -296,6 +333,9 @@ report:
 the search per day it covers, so a window of several hundred days belongs to the wildcard (0)
 rather than to a list; `scope-to-service: false` is what a deployment whose CDRs do not carry
 `SERVICE_INSTANCE.ID` should be set to, and the per-shard log line says whether it is one.
+
+`usage.wrap-window` is what keeps a 32-bit counter regression out of `UTLIZED_QUOTA` — see
+**Why some instances are left out of the sum** above. 0 turns the exclusion off.
 
 `usage.nested` must describe how `sessionInstances` is actually mapped. Mapped as `nested`, usage
 can be summed per bucket. Mapped as a plain object, Elasticsearch flattens the array and a
