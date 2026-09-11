@@ -67,7 +67,12 @@ class UserDumpSqlTest {
         assertTrue(sql.contains("bkt.QUOTA_BUCKET_ID"),
                 "the quota bucket drives the usage lookup and must be selected");
         assertEquals(UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE + 1, UserDumpSql.COL_QUOTA_BUCKET_ID,
-                "the helper column follows the last CSV-mapped column");
+                "the helper columns follow the last CSV-mapped column");
+        assertTrue(sql.contains("svc.ID AS SERVICE_ID"),
+                "UTLIZED_QUOTA is the usage of one bundle's bucket, so the lookup needs the "
+                        + "service instance beside the bucket id");
+        assertEquals(UserDumpSql.COL_QUOTA_BUCKET_ID + 1, UserDumpSql.COL_SERVICE_ID,
+                "the second helper column follows the first");
         assertEquals(UserDumpSql.COL_VLAN_ID + 1, UserDumpSql.COL_NOTIFICATION_TEMPLATES,
                 "the statement selects nothing for NAS_IP_ADDRESS, so the columns either side "
                         + "of that CSV position are adjacent in the result set");

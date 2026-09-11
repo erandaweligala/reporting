@@ -98,8 +98,47 @@ public class UserDumpProperties {
         /** Composite aggregation page size: usernames returned per Elasticsearch round trip. */
         private int pageSize = 2000;
 
-        /** Maximum distinct buckets counted for a single user in a day. */
+        /**
+         * Days of CDR indices the bucket totals are summed over, ending at the reported day.
+         *
+         * <p>0, the default, is every daily index the cluster still holds — which is what
+         * UTLIZED_QUOTA means: the whole of what a bundle has drawn from its quota bucket, not the
+         * slice of it that fell on D-1. The days after the reported day are struck out of the
+         * wildcard by name, so the index cdr-service is writing into is still never read.
+         *
+         * <p>A positive value names that many daily indices instead. It bounds the scan on a
+         * cluster that keeps years of them, and it is the setting to reach for if a retention
+         * policy keeps indices around for longer than a bundle can live — but each day is one more
+         * name in the index expression, so a very long window belongs to the wildcard rather than
+         * to a list of several hundred names.
+         */
+        private int lookbackDays = 0;
+
+        /** Maximum distinct buckets counted for a single user. */
         private int bucketsPerUser = 20;
+
+        /**
+         * Maximum distinct service instances counted against one of that user's buckets. A
+         * subscriber holds one bundle at a time, so this only has to be wide enough to see past
+         * the cycles behind the current one.
+         */
+        private int servicesPerUser = 10;
+
+        /**
+         * Whether a bucket's total is scoped to the bundle the dump is reporting, by the
+         * {@code serviceId} cdr-service records on each session instance.
+         *
+         * <p>On, because a bucket id names the plan's bucket rather than one instance of it: a
+         * subscriber on a recurring plan draws on the same bucket id every cycle, and without the
+         * scope UTLIZED_QUOTA would report every cycle's usage against the current cycle's QUOTA.
+         *
+         * <p>Off reports the bucket's total across every bundle that drew on it, which is also
+         * what an unscoped total falls back to for a user whose CDRs name no service the dump
+         * recognises. The dump logs how many of a shard's rows took that fallback, so a
+         * {@code serviceId} that is not SERVICE_INSTANCE.ID shows up in the log rather than as a
+         * column of quietly unscoped figures.
+         */
+        private boolean scopeToService = true;
 
         /**
          * Distinct NAS addresses considered for a single user in a day. NAS_IP_ADDRESS reports the
@@ -122,7 +161,7 @@ public class UserDumpProperties {
          * Whether sessionInstances is mapped as a nested type. When it is, usage can be summed
          * per bucket; when it is not, Elasticsearch flattens the array and a per-bucket sum would
          * silently attribute every instance's usage to every bucket the session touched, so the
-         * whole session's usage is reported against the user instead.
+         * user's whole usage is reported against them instead.
          */
         private boolean nested = true;
 

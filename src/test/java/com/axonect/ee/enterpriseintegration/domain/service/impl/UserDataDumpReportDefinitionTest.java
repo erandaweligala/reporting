@@ -53,6 +53,9 @@ class UserDataDumpReportDefinitionTest {
                     + "CUSTOMER_ACTIVATION_DATE,BUNDLE_ACTIVATION_DATE,BUNDLE_NAME,PLAN_BANDWIDTH,QUOTA,"
                     + "UTLIZED_QUOTA,BUNDLE_DEACTIVATION_DATE";
 
+    /** The SERVICE_INSTANCE the fixtures' bundle is, and so the bundle UTLIZED_QUOTA is of. */
+    private static final String SERVICE_ID = "SVC-NOW";
+
     @TempDir
     Path tempDir;
 
@@ -273,6 +276,47 @@ class UserDataDumpReportDefinitionTest {
         assertEquals("FTTH_50Mbps", written[35], "PLAN_BANDWIDTH");
         assertEquals("", written[36], "QUOTA");
         assertEquals("70093948746", written[37], "UTLIZED_QUOTA");
+    }
+
+    @Test
+    void reportsWhatTheBundleDrewFromItsBucketRatherThanWhatEveryBundleDrew() throws Exception {
+        // The bucket id names the plan's bucket, so a recurring subscriber draws on the same one
+        // every cycle. 900 of the 1024 belong to a bundle that has since expired, and QUOTA beside
+        // this column is the current bundle's allowance.
+        stubReader(List.<String[]>of(databaseRow("recurringuser", "FTTH_50Mbps", "1024", "DATA_1")));
+        stubUsageSplitAcrossBundles("recurringuser", "DATA_1", Map.of("SVC-OLD", 900L, SERVICE_ID, 124L));
+
+        Path output = outputWithHeader("bundle-scoped.csv");
+        definition.streamTo(report(), output);
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals("124", written[37], "UTLIZED_QUOTA is this bundle's share of the bucket");
+    }
+
+    @Test
+    void fallsBackToTheBucketsWholeTotalWhenNoBundleOfThatNameDrewOnIt() throws Exception {
+        // What a CDR whose serviceId is not SERVICE_INSTANCE.ID degrades to. Reporting zero would
+        // read as a subscriber who has used nothing; the unscoped total is at least a real figure.
+        stubReader(List.<String[]>of(databaseRow("unmatcheduser", "FTTH_50Mbps", "1024", "DATA_1")));
+        stubUsage(Map.of("unmatcheduser", Map.of("DATA_1", 700L)), Map.of(), "SVC-SOMETHING-ELSE");
+
+        Path output = outputWithHeader("unmatched.csv");
+        definition.streamTo(report(), output);
+
+        assertEquals("700", Files.readAllLines(output).get(1).split(",", -1)[37], "UTLIZED_QUOTA");
+    }
+
+    @Test
+    void scopingCanBeSwitchedOffToReportTheBucketAcrossEveryBundle() throws Exception {
+        properties.getUsage().setScopeToService(false);
+        stubReader(List.<String[]>of(databaseRow("recurringuser", "FTTH_50Mbps", "1024", "DATA_1")));
+        stubUsageSplitAcrossBundles("recurringuser", "DATA_1", Map.of("SVC-OLD", 900L, SERVICE_ID, 124L));
+
+        Path output = outputWithHeader("unscoped.csv");
+        definition.streamTo(report(), output);
+
+        assertEquals("1024", Files.readAllLines(output).get(1).split(",", -1)[37],
+                "with the scope off the bucket's total across bundles is what is reported");
     }
 
     @Test
@@ -506,12 +550,22 @@ class UserDataDumpReportDefinitionTest {
         });
     }
 
-    /** Serves the Elasticsearch side from a fixed table, in the username order the join expects. */
+    /**
+     * Serves the Elasticsearch side from a fixed table, in the username order the join expects.
+     * Every bucket total is also recorded against {@link #SERVICE_ID}, the bundle the fixtures'
+     * rows carry, so these users read as having drawn it all on the bundle being reported.
+     */
     private void stubUsage(Map<String, Map<String, Long>> usageByUser) {
         stubUsage(usageByUser, Map.of());
     }
 
     private void stubUsage(Map<String, Map<String, Long>> usageByUser, Map<String, String> nasByUser) {
+        stubUsage(usageByUser, nasByUser, SERVICE_ID);
+    }
+
+    /** The same, with the bucket totals recorded against a bundle of the caller's choosing. */
+    private void stubUsage(Map<String, Map<String, Long>> usageByUser, Map<String, String> nasByUser,
+                           String drawnBy) {
         when(usageAggregationClient.open(any(), any(), any())).thenAnswer(invocation -> {
             String from = invocation.getArgument(1);
             shardInProgress.set(from == null ? OPEN_START : from);
@@ -528,10 +582,43 @@ class UserDataDumpReportDefinitionTest {
                     String user = iterator.next();
                     Map<String, Long> buckets = usageByUser.get(user);
                     long total = buckets.values().stream().mapToLong(Long::longValue).sum();
-                    return new UserUsage(user, buckets, total, true, nasByUser.get(user));
+                    return new UserUsage(user, buckets, drawnBy(buckets, drawnBy), total, true,
+                            nasByUser.get(user));
                 }
             };
         });
+    }
+
+    /**
+     * One user whose single bucket was drawn on by more than one bundle: the bucket's total is
+     * the sum, and each bundle's share is recorded beside it the way the aggregation reports it.
+     */
+    private void stubUsageSplitAcrossBundles(String user, String bucketId, Map<String, Long> byService) {
+        long total = byService.values().stream().mapToLong(Long::longValue).sum();
+        Map<String, Long> perServiceBucket = new HashMap<>();
+        byService.forEach((serviceId, usage) -> perServiceBucket.put(
+                UserUsageCursor.UserUsage.serviceBucketKey(serviceId, bucketId), usage));
+
+        when(usageAggregationClient.open(any(), any(), any())).thenAnswer(invocation -> {
+            shardInProgress.set(OPEN_START);
+            var entry = new java.util.concurrent.atomic.AtomicReference<>(
+                    new UserUsageCursor.UserUsage(user, Map.of(bucketId, total), perServiceBucket,
+                            total, true, null));
+            return new UserUsageCursor() {
+                @Override
+                protected UserUsage fetchNext() {
+                    return entry.getAndSet(null);
+                }
+            };
+        });
+    }
+
+    /** The bucket totals keyed the way the aggregation reports a single bundle's share of them. */
+    private static Map<String, Long> drawnBy(Map<String, Long> buckets, String serviceId) {
+        Map<String, Long> perServiceBucket = new HashMap<>();
+        buckets.forEach((bucketId, usage) -> perServiceBucket.put(
+                UserUsageCursor.UserUsage.serviceBucketKey(serviceId, bucketId), usage));
+        return perServiceBucket;
     }
 
     /**
@@ -540,7 +627,7 @@ class UserDataDumpReportDefinitionTest {
      * in for SLMN the way the statement binds it.
      */
     private String[] databaseRow(String userName, String bandwidth, String quota, String quotaBucketId) {
-        String[] values = new String[UserDumpSql.COL_QUOTA_BUCKET_ID];
+        String[] values = new String[UserDumpSql.COL_SERVICE_ID];
         for (int i = 0; i < values.length; i++) {
             values[i] = "col" + (i + 1);
         }
@@ -550,6 +637,7 @@ class UserDataDumpReportDefinitionTest {
         values[35] = quota;
         values[UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE - 1] = "bundle-end";
         values[UserDumpSql.COL_QUOTA_BUCKET_ID - 1] = quotaBucketId;
+        values[UserDumpSql.COL_SERVICE_ID - 1] = SERVICE_ID;
         return values;
     }
 

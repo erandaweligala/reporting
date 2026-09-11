@@ -41,6 +41,11 @@ import java.util.List;
  * that position and {@code UserDataDumpReportDefinition} splices the value in from the same
  * per-user stream that already produces UTLIZED_QUOTA.
  *
+ * <p>The statement ends with two columns that are not part of the dump at all — the quota bucket's
+ * id and the id of the SERVICE_INSTANCE holding it. Neither is written to the CSV; they are what
+ * the Elasticsearch side is asked with, so that UTLIZED_QUOTA is everything this bundle has drawn
+ * from this bucket rather than everything every bundle ever drew from a bucket of that name.
+ *
  * <p>Each stand-in is aliased to the dump column it fills, so the select list can be read against
  * the CSV header even though the reader indexes the result set by position. Selecting a column
  * AAA_USER does not have — which is what NOTIFICATION_TEMPLATES was — costs the whole dump rather
@@ -65,6 +70,11 @@ public final class UserDumpSql {
     public static final int COL_BUNDLE_DEACTIVATION_DATE = 37;
     /** Helper column: the bucket whose usage becomes UTLIZED_QUOTA. Not written to the CSV. */
     public static final int COL_QUOTA_BUCKET_ID = 38;
+    /**
+     * Helper column: the SERVICE_INSTANCE that bucket belongs to, which is the bundle UTLIZED_QUOTA
+     * is the usage of. Not written to the CSV.
+     */
+    public static final int COL_SERVICE_ID = 39;
 
     private UserDumpSql() {
     }
@@ -157,7 +167,11 @@ public final class UserDumpSql {
            .append("        ").append(asText("svc.SERVICE_START_DATE", fmt, "BUNDLE_ACTIVATION_DATE")).append(",")
            .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")
            .append("        ").append(asText("svc.EXPIRY_DATE", fmt, "BUNDLE_DEACTIVATION_DATE")).append(",")
-           .append("        bkt.QUOTA_BUCKET_ID")
+           // The last two are read by the dump rather than written to it: together they name the
+           // bucket instance whose lifetime usage UTLIZED_QUOTA reports. The bucket id alone
+           // would not — it names the plan's bucket, so a recurring bundle draws on the same one
+           // cycle after cycle and the service id is what separates this cycle from the last.
+           .append("        bkt.QUOTA_BUCKET_ID, svc.ID AS SERVICE_ID")
            .append(" FROM AAA_USER u")
            .append(" LEFT JOIN svc ON svc.USERNAME = u.USER_NAME")
            .append(" LEFT JOIN bkt ON bkt.SERVICE_ID = svc.ID")

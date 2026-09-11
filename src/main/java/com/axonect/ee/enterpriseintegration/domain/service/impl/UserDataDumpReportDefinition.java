@@ -44,6 +44,12 @@ import java.util.concurrent.Executor;
  * no extra round trip. SLMN has no column either, but a stand-in worth binding: the dump
  * statement selects the username in its place.
  *
+ * <p>UTLIZED_QUOTA is the total the reported bundle has drawn from its quota bucket, which is what
+ * makes it readable next to QUOTA, the bucket's whole allowance. cdr-service keeps no such total:
+ * it records a usage delta per accounting event, tagged with the bucket and the service instance
+ * it was drawn against, so the total is summed over every CDR index up to the reported day and
+ * asked for by the pair the dump statement carries in its last two columns.
+ *
  * <p>The cursor hands out one row per MAC address rather than one row per user: collapsing the
  * addresses in SQL would mean LISTAGG, which is the construct the server rejects (see
  * {@link UserDumpSql#build}). So the rows are collapsed here instead, by
@@ -121,7 +127,8 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     /**
      * Zero-based positions of the two columns that are not read from the database. AAA_USER
      * carries neither, so both are filled from the CDR session documents in Elasticsearch: the NAS
-     * the user's sessions were anchored to, and the usage drawn from the bundle's quota bucket.
+     * the user's sessions were anchored to on the reported day, and the total the bundle has drawn
+     * from its quota bucket.
      */
     private static final int NAS_IP_ADDRESS_POSITION = 30;
     private static final int UTILIZED_QUOTA_POSITION = 37;
@@ -257,7 +264,8 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
 
             // One buffer per shard, reused for every user. Each shard runs on its own thread and
             // never shares it.
-            MacCollapsingWriter rows = new MacCollapsingWriter(usage, writer);
+            MacCollapsingWriter rows = new MacCollapsingWriter(
+                    usage, writer, properties.getUsage().isScopeToService());
 
             rowReader.streamInBinaryOrder(
                     statement,
@@ -269,8 +277,29 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
 
             log.info("Shard [{} .. {}) wrote {} rows in {} ms",
                     range.fromInclusive(), range.toExclusive(), rows.written(), System.currentTimeMillis() - start);
+            logQuotaAttribution(range, rows);
             return rows.written();
         }
+    }
+
+    /**
+     * Reports how much of the shard's UTLIZED_QUOTA was the reported bundle's own usage.
+     *
+     * <p>The fallback — a bucket's total across every bundle that drew on it — is a plausible
+     * looking number, so a wrong assumption about the CDR's serviceId cannot be seen in the file.
+     * It can be seen here: a shard that attributed none of its rows is a shard whose session
+     * instances are not keyed by SERVICE_INSTANCE.ID, and {@code scope-to-service: false} is then
+     * the honest setting until they are.
+     */
+    private void logQuotaAttribution(UsernameRange range, MacCollapsingWriter rows) {
+        if (!properties.getUsage().isScopeToService() || rows.withQuotaBucket() == 0) {
+            return;
+        }
+        log.info("Shard [{} .. {}) took UTLIZED_QUOTA from the reported bundle's own usage for {} "
+                        + "of {} user(s) with both a quota bucket and CDR usage, and from the "
+                        + "bucket's total across bundles for the rest",
+                range.fromInclusive(), range.toExclusive(),
+                rows.scopedToBundle(), rows.withQuotaBucket());
     }
 
     /**
@@ -314,6 +343,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
 
         private final UserUsageCursor usage;
         private final StreamingCsvWriter writer;
+        private final boolean scopeToService;
         private final String[] row = new String[COLUMNS.size()];
         private final StringBuilder macAddresses = new StringBuilder();
         private final StringBuilder originalMacAddresses = new StringBuilder();
@@ -321,10 +351,14 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         private String userName;
         private int macListBytes;
         private long written;
+        private long withQuotaBucket;
+        private long scopedToBundle;
 
-        private MacCollapsingWriter(UserUsageCursor usage, StreamingCsvWriter writer) {
+        private MacCollapsingWriter(UserUsageCursor usage, StreamingCsvWriter writer,
+                                    boolean scopeToService) {
             this.usage = usage;
             this.writer = writer;
+            this.scopeToService = scopeToService;
         }
 
         void accept(ResultSet resultSet) throws Exception {
@@ -353,6 +387,16 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             return written;
         }
 
+        /** Users written who have both a quota bucket and CDR usage to report against it. */
+        long withQuotaBucket() {
+            return withQuotaBucket;
+        }
+
+        /** How many of those had that usage found under the bundle the dump reports. */
+        long scopedToBundle() {
+            return scopedToBundle;
+        }
+
         /**
          * Lays one result set row out over the CSV columns, splicing the two Elasticsearch-filled
          * columns into the positions the database has no column for. Everything before
@@ -369,19 +413,40 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             }
 
             String quotaBucketId = resultSet.getString(UserDumpSql.COL_QUOTA_BUCKET_ID);
+            // The bucket's id names the plan's bucket, so the service instance holding it is what
+            // says which of the user's bundles the usage should be the total of. Reading the column
+            // at all is what scope-to-service switches off.
+            String serviceId = scopeToService ? resultSet.getString(UserDumpSql.COL_SERVICE_ID) : null;
             // One probe per user: the cursor hands each username out once, and both spliced columns
             // come out of that single record. The user's remaining rows differ only in their MAC
             // address, so probing on the first of them is probing once.
-            UserUsageCursor.UserUsage day = usage.forUser(user);
+            UserUsageCursor.UserUsage cdr = usage.forUser(user);
 
-            row[NAS_IP_ADDRESS_POSITION] = day == null ? null : day.nasIpAddress();
-            row[UTILIZED_QUOTA_POSITION] = day == null ? null : Long.toString(day.usageOn(quotaBucketId));
+            row[NAS_IP_ADDRESS_POSITION] = cdr == null ? null : cdr.nasIpAddress();
+            row[UTILIZED_QUOTA_POSITION] =
+                    cdr == null ? null : Long.toString(cdr.usageOn(serviceId, quotaBucketId));
             row[UTILIZED_QUOTA_POSITION + 1] = resultSet.getString(UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE);
+            countAttribution(cdr, serviceId, quotaBucketId);
 
             userName = user;
             macAddresses.setLength(0);
             originalMacAddresses.setLength(0);
             macListBytes = 0;
+        }
+
+        /**
+         * Tallies whether the figure just written was the reported bundle's own usage or the
+         * bucket's total across bundles, for the one line the shard logs at the end. One extra map
+         * probe per user rather than a record per user: this runs three million times.
+         */
+        private void countAttribution(UserUsageCursor.UserUsage cdr, String serviceId, String quotaBucketId) {
+            if (cdr == null || serviceId == null || quotaBucketId == null || quotaBucketId.isEmpty()) {
+                return;
+            }
+            withQuotaBucket++;
+            if (cdr.attributedTo(serviceId, quotaBucketId)) {
+                scopedToBundle++;
+            }
         }
 
         /**
