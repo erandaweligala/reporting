@@ -163,7 +163,7 @@ public final class UserDumpSql {
            // NAS_IP_ADDRESS column either — that one is filled from the CDR session documents in
            // Elasticsearch, so nothing is selected for it here.
            .append("        u.USER_NAME AS SLMN, u.VLAN_ID, u.TEMPLATE_ID AS NOTIFICATION_TEMPLATES,")
-           .append("        ").append(asText("u.CREATED_DATE", fmt, "CUSTOMER_ACTIVATION_DATE")).append(",")
+           .append("        ").append(asText("u.ACTIVATION_DATE", fmt, "CUSTOMER_ACTIVATION_DATE")).append(",")
            .append("        ").append(asText("svc.SERVICE_START_DATE", fmt, "BUNDLE_ACTIVATION_DATE")).append(",")
            .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")
            .append("        ").append(asText("svc.EXPIRY_DATE", fmt, "BUNDLE_DEACTIVATION_DATE")).append(",")
