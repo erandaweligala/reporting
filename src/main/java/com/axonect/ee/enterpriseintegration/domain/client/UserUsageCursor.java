@@ -6,19 +6,20 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * A forward-only stream of per-user daily CDR figures, ordered by username, that a caller walking
- * users in the same order can probe without ever holding more than one user's figures.
+ * A forward-only stream of per-user CDR figures, ordered by username, that a caller walking users
+ * in the same order can probe without ever holding more than one user's figures.
  *
- * <p>This is the half of the dump that keeps the Elasticsearch join off the heap. Materialising a
- * day for 3 million users as a map would cost hundreds of megabytes and a full aggregation scan
- * before the first CSV row could be written; instead both sides are read in username order and
+ * <p>This is the half of the dump that keeps the Elasticsearch join off the heap. Materialising
+ * every user's usage as a map would cost hundreds of megabytes and a full aggregation scan before
+ * the first CSV row could be written; instead both sides are read in username order and
  * merge-joined, so memory is bounded by one Elasticsearch page regardless of user count and the
  * two scans overlap.
  *
  * <p>Each user is handed out exactly once, so everything the dump takes from Elasticsearch — the
- * day's usage and the NAS the user's sessions were anchored to — has to come out of that single
- * probe. That is why {@link #forUser(String)} returns the whole record rather than one figure at a
- * time: a second probe for the same username would find the stream already past it.
+ * total drawn from each bucket and the NAS the user's sessions were anchored to — has to come out
+ * of that single probe. That is why {@link #forUser(String)} returns the whole record rather than
+ * one figure at a time: a second probe for the same username would find the stream already past
+ * it.
  */
 public abstract class UserUsageCursor implements AutoCloseable {
 
@@ -26,25 +27,75 @@ public abstract class UserUsageCursor implements AutoCloseable {
     private UserUsage head;
 
     /**
-     * A user's day: usage split per bucket where the mapping allows it, and the NAS IP address
-     * their sessions reported.
+     * What a user drew from the CDR indices the dump aggregated: the total usage of each bucket
+     * they touched, the same totals split by the bundle that drew them, and the NAS IP address
+     * their sessions on the reported day were anchored to.
      *
-     * @param userName      the username the CDR documents were grouped under
-     * @param perBucket     usage per bucket id, empty when the split is not trustworthy
-     * @param total         the day's usage across every bucket
-     * @param attributable  whether {@code perBucket} may be read
-     * @param nasIpAddress  NAS the day's sessions were anchored to, null when none was recorded
+     * <p>The bucket totals are lifetime figures, not a day's: UTLIZED_QUOTA is read next to QUOTA,
+     * which is the bucket's whole allowance, so the usage beside it has to be everything drawn
+     * from that bucket rather than the slice of it that happened to fall on D-1.
+     *
+     * @param userName          the username the CDR documents were grouped under
+     * @param perBucket         total usage per bucket id, empty when the split is not trustworthy
+     * @param perServiceBucket  the same totals per {@link #serviceBucketKey service and bucket},
+     *                          empty when the usage is not being scoped to a bundle
+     * @param total             usage across every bucket the user touched
+     * @param attributable      whether {@code perBucket} may be read
+     * @param nasIpAddress      NAS the reported day's sessions were anchored to, null when none
+     *                          was recorded
      */
-    public record UserUsage(String userName, Map<String, Long> perBucket, long total,
+    public record UserUsage(String userName, Map<String, Long> perBucket,
+                            Map<String, Long> perServiceBucket, long total,
                             boolean attributable, String nasIpAddress) {
 
-        /** Usage to report against {@code bucketId}, falling back to the day's total. */
+        /** Separator between the two halves of a {@link #perServiceBucket} key. */
+        private static final char KEY_SEPARATOR = '\u0000';
+
+        /** How {@link #perServiceBucket} is keyed, so the client fills it the way this reads it. */
+        public static String serviceBucketKey(String serviceId, String bucketId) {
+            return serviceId + KEY_SEPARATOR + bucketId;
+        }
+
+        /** Usage to report against {@code bucketId} by whichever bundle drew it. */
         public long usageOn(String bucketId) {
+            return usageOn(null, bucketId);
+        }
+
+        /**
+         * Usage to report against {@code bucketId} of the bundle {@code serviceId} names.
+         *
+         * <p>A bucket id is the plan's name for the bucket rather than an id of its own, so a
+         * subscriber on a recurring plan draws on the same bucket id cycle after cycle. Scoping
+         * the total to the service instance the dump is reporting is what keeps UTLIZED_QUOTA the
+         * usage of <em>this</em> bundle rather than of every bundle the user has ever held.
+         *
+         * <p>Falling back to the bucket's total across bundles, rather than to zero, is what a
+         * CDR whose {@code serviceId} is not SERVICE_INSTANCE.ID degrades to: an unscoped total is
+         * the same figure the dump would report with {@code scope-to-service} switched off, where
+         * a zero would read as a subscriber who has used nothing at all.
+         */
+        public long usageOn(String serviceId, String bucketId) {
             if (!attributable || bucketId == null || bucketId.isEmpty()) {
                 return total;
             }
+            if (attributedTo(serviceId, bucketId)) {
+                return perServiceBucket.get(serviceBucketKey(serviceId, bucketId));
+            }
             Long forBucket = perBucket.get(bucketId);
             return forBucket != null ? forBucket : 0L;
+        }
+
+        /**
+         * Whether {@link #usageOn(String, String)} would report the named bundle's own usage
+         * rather than the bucket's total across bundles. The dump counts this per shard: the
+         * fallback is invisible in the file itself, and a shard where it is what every row took
+         * is a shard whose CDRs do not key usage the way the dump assumes.
+         */
+        public boolean attributedTo(String serviceId, String bucketId) {
+            return attributable
+                    && serviceId != null && !serviceId.isEmpty()
+                    && bucketId != null && !bucketId.isEmpty()
+                    && perServiceBucket.containsKey(serviceBucketKey(serviceId, bucketId));
         }
     }
 
@@ -52,9 +103,9 @@ public abstract class UserUsageCursor implements AutoCloseable {
     protected abstract UserUsage fetchNext();
 
     /**
-     * The day's figures for {@code userName}, or null when the user has no session on the reported
-     * day. Callers must probe usernames in ascending UTF-8 order; a username that has already been
-     * passed cannot be revisited.
+     * The figures for {@code userName}, or null when the user has no session anywhere in the
+     * indices that were aggregated. Callers must probe usernames in ascending UTF-8 order; a
+     * username that has already been passed cannot be revisited.
      */
     public UserUsage forUser(String userName) {
         while (head == null || Utf8Order.compare(head.userName(), userName) < 0) {

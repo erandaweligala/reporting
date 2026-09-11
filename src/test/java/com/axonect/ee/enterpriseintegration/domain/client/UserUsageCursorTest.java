@@ -8,7 +8,9 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UserUsageCursorTest {
 
@@ -29,7 +31,18 @@ class UserUsageCursorTest {
 
     private static UserUsageCursor.UserUsage attributed(String user, Map<String, Long> buckets, String nasIp) {
         long total = buckets.values().stream().mapToLong(Long::longValue).sum();
-        return new UserUsageCursor.UserUsage(user, buckets, total, true, nasIp);
+        return new UserUsageCursor.UserUsage(user, buckets, Map.of(), total, true, nasIp);
+    }
+
+    /** A user whose bucket totals are also split by the bundle that drew each one. */
+    private static UserUsageCursor.UserUsage perBundle(String user, Map<String, Long> buckets,
+                                                       Map<String, Long> perServiceBucket) {
+        long total = buckets.values().stream().mapToLong(Long::longValue).sum();
+        return new UserUsageCursor.UserUsage(user, buckets, perServiceBucket, total, true, "10.20.30.40");
+    }
+
+    private static String key(String serviceId, String bucketId) {
+        return UserUsageCursor.UserUsage.serviceBucketKey(serviceId, bucketId);
     }
 
     /** Usage the cursor reports for one user against one bucket, or null when it has no day. */
@@ -78,7 +91,7 @@ class UserUsageCursorTest {
     }
 
     @Test
-    void usersWithNoSessionsThatDayReportNothing() {
+    void usersWithNoSessionsAtAllReportNothing() {
         UserUsageCursor cursor = cursorOver(List.of(attributed("carol", Map.of("DATA_1", 3L))));
 
         assertNull(cursor.forUser("alice"), "alice has no usage document at all");
@@ -93,19 +106,55 @@ class UserUsageCursorTest {
     }
 
     @Test
-    void fallsBackToTheDailyTotalWhenTheBundleHasNoQuotaBucket() {
+    void fallsBackToTheUsersWholeTotalWhenTheBundleHasNoQuotaBucket() {
         UserUsageCursor cursor = cursorOver(List.of(attributed("alice", Map.of("DATA_1", 7L, "DATA_2", 3L))));
 
         assertEquals(10L, usageFor(cursor, "alice", null));
     }
 
     @Test
-    void reportsTheDailyTotalWhenUsageCouldNotBeSplitPerBucket() {
+    void reportsTheWholeTotalWhenUsageCouldNotBeSplitPerBucket() {
         UserUsageCursor cursor = cursorOver(List.of(
-                new UserUsageCursor.UserUsage("alice", Map.of(), 42L, false, "10.20.30.40")));
+                new UserUsageCursor.UserUsage("alice", Map.of(), Map.of(), 42L, false, "10.20.30.40")));
 
         assertEquals(42L, usageFor(cursor, "alice", "DATA_1"),
-                "without a nested mapping the bucket split is not trustworthy, so the day is reported whole");
+                "without a nested mapping the bucket split is not trustworthy, so everything the "
+                        + "user drew is reported whole");
+    }
+
+    @Test
+    void reportsWhatTheNamedBundleDrewRatherThanWhatEveryBundleEverDrew() {
+        // A bucket id names the plan's bucket, so a recurring subscriber draws on the same one
+        // cycle after cycle: 900 of alice's 1000 belong to the bundle that has since expired.
+        UserUsageCursor cursor = cursorOver(List.of(perBundle("alice",
+                Map.of("DATA_1", 1000L),
+                Map.of(key("SVC-OLD", "DATA_1"), 900L, key("SVC-NOW", "DATA_1"), 100L))));
+
+        assertEquals(100L, cursor.forUser("alice").usageOn("SVC-NOW", "DATA_1"));
+    }
+
+    @Test
+    void fallsBackToTheBucketTotalWhenNoBundleOfThatNameDrewOnIt() {
+        // What a CDR whose serviceId is not SERVICE_INSTANCE.ID degrades to: the unscoped total,
+        // which is a real figure, rather than a zero that would read as a subscriber using nothing.
+        UserUsageCursor.UserUsage alice = perBundle("alice",
+                Map.of("DATA_1", 1000L), Map.of(key("SVC-OLD", "DATA_1"), 1000L));
+        UserUsageCursor cursor = cursorOver(List.of(alice));
+
+        UserUsageCursor.UserUsage day = cursor.forUser("alice");
+        assertEquals(1000L, day.usageOn("SVC-UNKNOWN", "DATA_1"));
+        assertFalse(day.attributedTo("SVC-UNKNOWN", "DATA_1"),
+                "the dump counts this per shard, so a wrong assumption shows up in the log");
+        assertTrue(day.attributedTo("SVC-OLD", "DATA_1"));
+    }
+
+    @Test
+    void withoutAServiceTheBucketsWholeTotalIsWhatIsReported() {
+        UserUsageCursor cursor = cursorOver(List.of(perBundle("alice",
+                Map.of("DATA_1", 1000L), Map.of(key("SVC-NOW", "DATA_1"), 100L))));
+
+        assertEquals(1000L, cursor.forUser("alice").usageOn(null, "DATA_1"),
+                "scope-to-service off asks with no service and gets the bucket across bundles");
     }
 
     @Test
