@@ -99,18 +99,22 @@ public class UserDumpProperties {
         private int pageSize = 2000;
 
         /**
-         * Days of CDR indices the bucket totals are summed over, ending at the reported day.
+         * Days of CDR indices the bucket totals are summed over, ending today.
          *
          * <p>0, the default, is every daily index the cluster still holds — which is what
          * UTLIZED_QUOTA means: the whole of what a bundle has drawn from its quota bucket, not the
-         * slice of it that fell on D-1. The days after the reported day are struck out of the
-         * wildcard by name, so the index cdr-service is writing into is still never read.
+         * slice of it that fell on D-1. Today's index is read with the rest. Striking the days
+         * after the reported one out of the wildcard by name is what used to keep a dump off the
+         * index cdr-service is writing into, and what left a subscriber whose sessions all started
+         * after the reported day reported as having drawn nothing at all — not a zero, an empty
+         * column, because a user with no document anywhere in the scan is one the aggregation
+         * never returns.
          *
-         * <p>A positive value names that many daily indices instead. It bounds the scan on a
-         * cluster that keeps years of them, and it is the setting to reach for if a retention
-         * policy keeps indices around for longer than a bundle can live — but each day is one more
-         * name in the index expression, so a very long window belongs to the wildcard rather than
-         * to a list of several hundred names.
+         * <p>A positive value names that many daily indices instead, the last of them today's. It
+         * bounds the scan on a cluster that keeps years of them, and it is the setting to reach
+         * for if a retention policy keeps indices around for longer than a bundle can live — but
+         * each day is one more name in the index expression, so a very long window belongs to the
+         * wildcard rather than to a list of several hundred names.
          */
         private int lookbackDays = 0;
 

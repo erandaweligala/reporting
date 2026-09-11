@@ -197,10 +197,10 @@ class UserDumpSqlTest {
                         "YYYY-MM-DD HH24:MI:SS.FF3").sql(),
                 "AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS.FF3')"),
                 "a fractional model must still reach TO_CHAR through the cast");
-        // CUSTOMER_ACTIVATION_DATE has no column of its own on AAA_USER either: the dump reports
-        // CREATED_DATE in that position, which is why the created date is rendered twice.
-        assertEquals(2, countOccurrences(sql, "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP)"));
-        for (String column : List.of("u.CREATED_DATE", "u.UPDATED_DATE",
+        // CUSTOMER_ACTIVATION_DATE is AAA_USER.ACTIVATION_DATE, a column of its own — so the
+        // created date is rendered once, under its own name, and not twice.
+        assertEquals(1, countOccurrences(sql, "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP)"));
+        for (String column : List.of("u.CREATED_DATE", "u.UPDATED_DATE", "u.ACTIVATION_DATE",
                 "svc.SERVICE_START_DATE", "svc.EXPIRY_DATE")) {
             assertTrue(sql.contains("TO_CHAR(CAST(" + column + " AS TIMESTAMP), '" + DATE_FORMAT + "')"),
                     column + " must be rendered under the configured format model");
@@ -211,12 +211,12 @@ class UserDumpSqlTest {
     void namesEveryRenderedTimestampAfterTheDumpColumnItFills() {
         String sql = build(null, null).sql();
 
-        // A TO_CHAR has no column name of its own, and two of these render the very same column
-        // into different dump columns, so the statement in the log says which is which.
+        // A TO_CHAR has no column name of its own, and five of them in a row say nothing about
+        // which dump column each fills, so the statement in the log says it for them.
         for (String named : List.of(
                 "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP), '" + DATE_FORMAT + "') AS CREATED_DATE",
                 "TO_CHAR(CAST(u.UPDATED_DATE AS TIMESTAMP), '" + DATE_FORMAT + "') AS UPDATED_DATE",
-                "TO_CHAR(CAST(u.CREATED_DATE AS TIMESTAMP), '" + DATE_FORMAT
+                "TO_CHAR(CAST(u.ACTIVATION_DATE AS TIMESTAMP), '" + DATE_FORMAT
                         + "') AS CUSTOMER_ACTIVATION_DATE",
                 "TO_CHAR(CAST(svc.SERVICE_START_DATE AS TIMESTAMP), '" + DATE_FORMAT
                         + "') AS BUNDLE_ACTIVATION_DATE",

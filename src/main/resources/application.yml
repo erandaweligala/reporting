@@ -226,12 +226,14 @@ report:
       enabled: true
       index: radius-sessions     # cdr-service `sessions-data`; the daily indices are derived from it
       page-size: 2000            # usernames per composite aggregation page
-      # Days of CDR indices UTLIZED_QUOTA is summed over, ending at the reported day. 0 is every
-      # index the cluster still holds, which is what a total means: the column is read next to
-      # QUOTA, the bucket's whole allowance, so it has to be everything the bundle has drawn from
-      # that bucket rather than the slice of it that fell on D-1. The days after the reported one
-      # are struck out of the wildcard by name, so the index cdr-service is writing into is still
-      # never read. A positive value names that many daily indices instead.
+      # Days of CDR indices UTLIZED_QUOTA is summed over, ending today. 0 is every index the
+      # cluster still holds, which is what a total means: the column is read next to QUOTA, the
+      # bucket's whole allowance, so it has to be everything the bundle has drawn from that bucket
+      # rather than the slice of it that fell on D-1. Today's index is read along with the rest —
+      # striking the days after the reported one out of the wildcard, which is what kept a dump
+      # off the index cdr-service writes into, left a bundle taken out this morning with an empty
+      # UTLIZED_QUOTA rather than with its usage. A positive value names that many daily indices
+      # instead, the last of them today's.
       lookback-days: 0
       buckets-per-user: 20
       # The CDR names the service instance each usage delta was drawn against, and a bucket id

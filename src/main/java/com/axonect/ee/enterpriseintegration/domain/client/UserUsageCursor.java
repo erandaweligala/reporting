@@ -33,7 +33,9 @@ public abstract class UserUsageCursor implements AutoCloseable {
      *
      * <p>The bucket totals are lifetime figures, not a day's: UTLIZED_QUOTA is read next to QUOTA,
      * which is the bucket's whole allowance, so the usage beside it has to be everything drawn
-     * from that bucket rather than the slice of it that happened to fall on D-1.
+     * from that bucket as of the run — not the slice of it that happened to fall on D-1, and not
+     * everything up to D-1 either, which left a bundle taken out this morning reporting nothing
+     * at all.
      *
      * @param userName          the username the CDR documents were grouped under
      * @param perBucket         total usage per bucket id, empty when the split is not trustworthy
@@ -83,6 +85,22 @@ public abstract class UserUsageCursor implements AutoCloseable {
             }
             Long forBucket = perBucket.get(bucketId);
             return forBucket != null ? forBucket : 0L;
+        }
+
+        /**
+         * Whether the CDR named {@code bucketId} among the buckets this user drew on.
+         *
+         * <p>False is what makes UTLIZED_QUOTA a 0 — and a 0 that means "nothing is recorded
+         * against this bucket", which is not the same thing as "nothing was drawn from it". The
+         * two read identically in the file, so the dump counts this per shard as well: a shard
+         * where no row's quota bucket was one the CDR names is a shard whose session instances
+         * are keyed by something other than the BUCKET_ID the dump statement reads.
+         *
+         * <p>A user whose usage could not be split per bucket at all reports true, because the
+         * figure they get is their whole total rather than a zero of that kind.
+         */
+        public boolean knowsBucket(String bucketId) {
+            return !attributable || perBucket.containsKey(bucketId);
         }
 
         /**

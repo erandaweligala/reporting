@@ -38,10 +38,12 @@ import java.util.Map;
  * reconstructs a total — cdr-service stores no running total of its own.
  *
  * <p>What UTLIZED_QUOTA needs is that total, not a day of it. It is read next to QUOTA, which is
- * the bucket's whole allowance, so the usage beside it is summed over every daily index up to and
- * including the reported day rather than over the reported day alone. The index expression still
- * names the days it must not read — the index cdr-service is writing into now is excluded by name,
- * so a dump never touches the hot index however wide the rest of the scan is.
+ * the bucket's whole allowance, so the usage beside it is summed over every daily index the
+ * cluster holds — up to and including the day the dump runs, not up to the day it reports on. A
+ * subscriber who took their bundle out this morning has drawn everything they have drawn from
+ * today's index, and striking that index out by name reported them as having no usage at all:
+ * not a zero, but an empty column, because a user with no document anywhere in the scan is a user
+ * the aggregation never returns.
  *
  * <p>Usage is summed with a composite aggregation rather than fetched as hits: for 3 million users
  * the hits would be tens of millions of documents over the wire, whereas the aggregation ships one
@@ -72,8 +74,6 @@ public class UsageAggregationClient {
     private static final String USERNAME_FIELD = "userName.keyword";
     /** Metadata field the NAS filter pins to the reported day's own index. */
     private static final String INDEX_FIELD = "_index";
-    /** Excluded from an index expression, so the scan stops short of a day it must not read. */
-    private static final String EXCLUDE = "-";
 
     private final ObjectProvider<ElasticsearchClient> clientProvider;
     private final UserDumpProperties properties;
@@ -91,43 +91,46 @@ public class UsageAggregationClient {
 
     /**
      * The index expression the totals are summed over: every daily index up to and including
-     * {@code day}.
+     * today, whichever day the dump is reporting on.
      *
-     * <p>With {@code lookback-days} left at 0 that is the base pattern's wildcard, with the days
-     * after {@code day} — today's hot index among them — struck out of it by name. The exclusions
-     * are what keep the old guarantee intact now that the scan is no longer a single named day: a
-     * dump aggregates history, never the index cdr-service is writing into as it runs.
+     * <p>With {@code lookback-days} left at 0 that is the base pattern's wildcard and nothing
+     * else. It used to strike the days after the reported one out of that wildcard by name, to
+     * keep a dump off the index cdr-service is writing into — and that is what left a subscriber
+     * whose sessions all started after the reported day with an empty UTLIZED_QUOTA rather than
+     * with their usage. The total is read next to QUOTA, so it has to be what the bundle has drawn
+     * as of the run; a delta cdr-service wrote an hour ago is as much a part of that as one it
+     * wrote last week. Aggregating a live index costs the cluster a search, which is what every
+     * other day of the scan costs it too.
      *
-     * <p>A positive {@code lookback-days} names that many days instead, ending at {@code day}.
-     * That bounds a scan on a cluster holding years of indices, at the cost of an index expression
-     * that grows a name per day — past a few hundred days the wildcard is the setting that scales,
-     * not a longer list.
+     * <p>The reported day still bounds everything it should: which bundle the dump reports, and —
+     * through a filter of its own, not through this expression — which day's NAS address sits
+     * beside the total.
+     *
+     * <p>A positive {@code lookback-days} names that many days instead, ending today. That bounds
+     * a scan on a cluster holding years of indices, at the cost of an index expression that grows
+     * a name per day — past a few hundred days the wildcard is the setting that scales, not a
+     * longer list.
      */
-    public List<String> indicesUpTo(LocalDate day) {
+    public List<String> indicesThroughToday() {
         UserDumpProperties.Usage usage = properties.getUsage();
 
         int lookback = usage.getLookbackDays();
-        if (lookback > 0) {
-            List<String> indices = new ArrayList<>(lookback);
-            for (int back = lookback - 1; back >= 0; back--) {
-                indices.add(indexFor(day.minusDays(back)));
-            }
-            return indices;
+        if (lookback <= 0) {
+            return List.of(usage.getIndex() + "-*");
         }
 
-        List<String> indices = new ArrayList<>();
-        indices.add(usage.getIndex() + "-*");
         LocalDate today = LocalDate.now(ZoneId.of(properties.getTimezone()));
-        for (LocalDate after = day.plusDays(1); !after.isAfter(today); after = after.plusDays(1)) {
-            indices.add(EXCLUDE + indexFor(after));
+        List<String> indices = new ArrayList<>(lookback);
+        for (int back = lookback - 1; back >= 0; back--) {
+            indices.add(indexFor(today.minusDays(back)));
         }
         return indices;
     }
 
     /**
-     * Opens a cursor over the session documents of every day up to {@code day}, restricted to a
-     * shard's username range. The bucket totals it hands out cover all of them; the NAS address
-     * beside them covers {@code day} alone.
+     * Opens a cursor over the session documents of every day up to today, restricted to a shard's
+     * username range. The bucket totals it hands out cover all of them; the NAS address beside
+     * them covers {@code day} alone.
      *
      * @param day            the day being reported on
      * @param usernameFrom   inclusive lower bound of the shard's username range, null for open
@@ -144,7 +147,8 @@ public class UsageAggregationClient {
         if (client == null) {
             throw new ReportClientException("Elasticsearch client is not configured for the usage lookup", null);
         }
-        return new CompositeUsageCursor(client, indicesUpTo(day), indexFor(day), usernameFrom, usernameTo, usage);
+        return new CompositeUsageCursor(
+                client, indicesThroughToday(), indexFor(day), usernameFrom, usernameTo, usage);
     }
 
     /**
@@ -302,11 +306,11 @@ public class UsageAggregationClient {
          * The NAS address, read inside a filter on the reported day's own index.
          *
          * <p>NAS_IP_ADDRESS reports the NAS that day's sessions were anchored to, and the usage
-         * around it is now summed over every index up to that day — without the filter the column
+         * around it is summed over every index the cluster holds — without the filter the column
          * would quietly start reporting whichever NAS a subscriber used most in all the history
-         * the cluster still holds. The address is a scalar on the session document, not on an
-         * instance, so this sits beside the usage aggregation whether or not the instances are
-         * nested.
+         * the cluster still holds, today's sessions included. The address is a scalar on the
+         * session document, not on an instance, so this sits beside the usage aggregation whether
+         * or not the instances are nested.
          */
         private Aggregation reportedDay() {
             Aggregation nasIp = new Aggregation.Builder()

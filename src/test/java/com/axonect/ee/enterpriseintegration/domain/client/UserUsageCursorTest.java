@@ -106,6 +106,27 @@ class UserUsageCursorTest {
     }
 
     @Test
+    void saysWhetherThatZeroCameFromABucketTheCdrHasNeverHeardOf() {
+        // Both zeroes read the same in the file: one is a bucket the subscriber has not drawn on,
+        // the other a bucket id the CDR does not key usage by at all. The shard log tells them
+        // apart, so a whole column of zeroes can be diagnosed from a run rather than guessed at.
+        UserUsageCursor.UserUsage alice = attributed("alice", Map.of("DATA_1", 0L, "VOICE_1", 900L));
+
+        assertTrue(alice.knowsBucket("DATA_1"), "drawn on, and the nothing drawn from it is a fact");
+        assertFalse(alice.knowsBucket("DATA_2"), "not a bucket any of alice's CDRs name");
+    }
+
+    @Test
+    void aUserWhoseUsageCouldNotBeSplitPerBucketCountsAsKnowingEveryBucket() {
+        // Without a nested mapping there is no split to look a bucket up in, and the figure such
+        // a user gets is their whole total — never a zero that a missing bucket produced.
+        UserUsageCursor.UserUsage alice =
+                new UserUsageCursor.UserUsage("alice", Map.of(), Map.of(), 42L, false, null);
+
+        assertTrue(alice.knowsBucket("DATA_1"));
+    }
+
+    @Test
     void fallsBackToTheUsersWholeTotalWhenTheBundleHasNoQuotaBucket() {
         UserUsageCursor cursor = cursorOver(List.of(attributed("alice", Map.of("DATA_1", 7L, "DATA_2", 3L))));
 

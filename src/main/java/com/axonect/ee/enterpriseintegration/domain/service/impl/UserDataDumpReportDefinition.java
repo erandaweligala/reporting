@@ -47,8 +47,14 @@ import java.util.concurrent.Executor;
  * <p>UTLIZED_QUOTA is the total the reported bundle has drawn from its quota bucket, which is what
  * makes it readable next to QUOTA, the bucket's whole allowance. cdr-service keeps no such total:
  * it records a usage delta per accounting event, tagged with the bucket and the service instance
- * it was drawn against, so the total is summed over every CDR index up to the reported day and
- * asked for by the pair the dump statement carries in its last two columns.
+ * it was drawn against, so the total is summed over every CDR index the cluster holds — today's
+ * among them — and asked for by the pair the dump statement carries in its last two columns.
+ *
+ * <p>Which of the two Elasticsearch-filled columns a user is missing says why. Both empty is a
+ * user the aggregation never returned: no session document anywhere in the scan, under that
+ * username. A figure of 0 beside a filled NAS address is the opposite — the user was found, and
+ * the bucket the database named is not one their CDRs drew on. The shard log counts both, because
+ * neither can be told from the other in the file.
  *
  * <p>The cursor hands out one row per MAC address rather than one row per user: collapsing the
  * addresses in SQL would mean LISTAGG, which is the construct the server rejects (see
@@ -277,9 +283,31 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
 
             log.info("Shard [{} .. {}) wrote {} rows in {} ms",
                     range.fromInclusive(), range.toExclusive(), rows.written(), System.currentTimeMillis() - start);
+            logUsageCoverage(range, rows);
             logQuotaAttribution(range, rows);
             return rows.written();
         }
+    }
+
+    /**
+     * Reports how many of the shard's rows got no usage out of Elasticsearch at all, and how many
+     * got a zero only because the bucket the database named is one the CDRs never mention.
+     *
+     * <p>Neither can be read off the file. An empty UTLIZED_QUOTA and a 0 both look like a
+     * subscriber who has not used their bundle, and the first of them is what a whole run of
+     * missing usage looked like while the scan stopped at the reported day. A shard that reports
+     * most of its users here is not reporting a quiet subscriber base — it is reporting that the
+     * usernames, or the bucket ids, are not the ones the CDR documents are keyed on.
+     */
+    private void logUsageCoverage(UsernameRange range, MacCollapsingWriter rows) {
+        if (!properties.getUsage().isEnabled() || rows.written() == 0) {
+            return;
+        }
+        log.info("Shard [{} .. {}) found no CDR usage at all for {} of {} user(s) — UTLIZED_QUOTA "
+                        + "and NAS_IP_ADDRESS are empty for those — and found {} more holding a "
+                        + "quota bucket their CDRs never name, whose UTLIZED_QUOTA is 0",
+                range.fromInclusive(), range.toExclusive(),
+                rows.withoutCdrUsage(), rows.written(), rows.withUnknownQuotaBucket());
     }
 
     /**
@@ -353,6 +381,8 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         private long written;
         private long withQuotaBucket;
         private long scopedToBundle;
+        private long withoutCdrUsage;
+        private long withUnknownQuotaBucket;
 
         private MacCollapsingWriter(UserUsageCursor usage, StreamingCsvWriter writer,
                                     boolean scopeToService) {
@@ -397,6 +427,20 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             return scopedToBundle;
         }
 
+        /** Users the aggregation never returned, whose two spliced columns are therefore empty. */
+        long withoutCdrUsage() {
+            return withoutCdrUsage;
+        }
+
+        /**
+         * Users the aggregation did return, holding a quota bucket their CDRs name nowhere — so
+         * UTLIZED_QUOTA is 0 because nothing was drawn from that bucket, or because the id the
+         * CDR keys usage on is not the BUCKET_ID the dump statement reads.
+         */
+        long withUnknownQuotaBucket() {
+            return withUnknownQuotaBucket;
+        }
+
         /**
          * Lays one result set row out over the CSV columns, splicing the two Elasticsearch-filled
          * columns into the positions the database has no column for. Everything before
@@ -435,12 +479,20 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         }
 
         /**
-         * Tallies whether the figure just written was the reported bundle's own usage or the
-         * bucket's total across bundles, for the one line the shard logs at the end. One extra map
-         * probe per user rather than a record per user: this runs three million times.
+         * Tallies where the figure just written came from, for the two lines the shard logs at
+         * the end: no CDR record at all, a quota bucket the CDRs never name, and — where there is
+         * both — the reported bundle's own usage rather than the bucket's total across bundles.
+         * Two map probes per user rather than a record per user: this runs three million times.
          */
         private void countAttribution(UserUsageCursor.UserUsage cdr, String serviceId, String quotaBucketId) {
-            if (cdr == null || serviceId == null || quotaBucketId == null || quotaBucketId.isEmpty()) {
+            if (cdr == null) {
+                withoutCdrUsage++;
+                return;
+            }
+            if (quotaBucketId != null && !quotaBucketId.isEmpty() && !cdr.knowsBucket(quotaBucketId)) {
+                withUnknownQuotaBucket++;
+            }
+            if (serviceId == null || quotaBucketId == null || quotaBucketId.isEmpty()) {
                 return;
             }
             withQuotaBucket++;
