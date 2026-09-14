@@ -120,19 +120,32 @@ session instance, which is the `SERVICE_INSTANCE` the usage was charged to; the 
 selects `svc.ID` alongside the bucket id for exactly that reason, and the aggregation splits each
 bucket's total by service so the row can ask for its own bundle's share.
 
-Both figures are kept, and the unsplit one is what the dump falls back to: if the CDR's `serviceId`
-turns out not to be `SERVICE_INSTANCE.ID`, every row reports the bucket's total across bundles —
-the same figure `scope-to-service: false` asks for — rather than a column of zeroes that would read
-as a subscriber base that has used nothing. That fallback is invisible in the file, so each shard
-logs how many of its rows took it:
+Both figures are kept, and the unsplit one is what the dump falls back to — but only where there is
+no split to read. If the CDR's `serviceId` turns out not to be `SERVICE_INSTANCE.ID`, the bucket
+comes back with no bundles named against it at all and every row reports the bucket's total across
+bundles — the same figure `scope-to-service: false` asks for — rather than a column of zeroes that
+would read as a subscriber base that has used nothing. The same holds for a bucket more bundles
+touched than `usage.services-per-user` has room for: a truncated split cannot tell a bundle that
+drew nothing from one the aggregation left out.
+
+Where the split *is* the whole of who drew on the bucket and the reported bundle is not in it, the
+bundle drew nothing and `UTLIZED_QUOTA` is `0`. Reporting the bucket's total there would be the very
+thing `scope-to-service` exists to prevent — every past cycle's usage against this cycle's `QUOTA` —
+and it is what a bundle taken out since cdr-service's last delta used to report.
+
+The fallback is invisible in the file, so each shard logs how many of its rows were attributed:
 
 ```
 Shard [f .. s) took UTLIZED_QUOTA from the reported bundle's own usage for 0 of 748210 user(s)
-holding a quota bucket, and from the bucket's total across bundles for the rest
+holding a quota bucket; the rest drew nothing the CDRs attribute to that bundle
 ```
 
 A shard reporting 0 there is a deployment whose CDRs do not key usage the way the dump assumes, and
 `scope-to-service: false` is the honest setting until they do.
+
+`BUCKET_INSTANCE.USAGE` reads this same figure and can ask for its bucket by `BUCKET_INSTANCE.ID` as
+well as by `BUCKET_ID`, because it is a row of that table and holds both. The dump reaches its
+bucket through the plan and has only `BUCKET_ID` to offer — see `docs/table-extracts.md`.
 
 `NAS_IP_ADDRESS` comes out of the same pass and is **not** a lifetime figure — it is still the NAS
 that day's sessions were anchored to. It is read inside a filter on the reported day's own index,

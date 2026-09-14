@@ -8,6 +8,7 @@ import com.axonect.ee.enterpriseintegration.domain.service.ExtractColumnSource;
 import lombok.extern.slf4j.Slf4j;
 
 import java.sql.ResultSet;
+import java.util.Objects;
 
 /**
  * USAGE for the BUCKET_INSTANCE extract, read from the CDR session documents in Elasticsearch
@@ -16,10 +17,21 @@ import java.sql.ResultSet;
  * <p>It is the same figure the user data dump reports as UTLIZED_QUOTA, asked for the same way:
  * cdr-service records a usage delta per accounting event, tagged with the {@code bucketId} it was
  * drawn from and the {@code serviceId} of the bundle it was charged to, and keeps no running total
- * — so the total is summed over every daily index the cluster holds and looked up by the pair each
- * row already carries, BUCKET_ID and SERVICE_ID. The difference between the two reports is only
- * which rows ask: the dump asks once per user, for the one bucket behind QUOTA, while this asks
- * once per bucket instance, which is what the extract is a row of.
+ * — so the total is summed over every daily index the cluster holds and looked up by the keys each
+ * row already carries. The difference between the two reports is only which rows ask: the dump asks
+ * once per user, for the one bucket behind QUOTA, while this asks once per bucket instance, which
+ * is what the extract is a row of.
+ *
+ * <p><b>Which id the bucket is asked by.</b> Both of the ones the row holds. A session instance's
+ * {@code bucketId} is BUCKET_INSTANCE.BUCKET_ID on one deployment and BUCKET_INSTANCE.ID on
+ * another, and the two cannot be told apart by looking at a value — so the row offers the plan's
+ * bucket first, which is the id the dump has to use, and its own id where the CDRs named that
+ * instead. This is the one lookup the extract can do that the dump cannot: the dump reaches its
+ * bucket through the plan and has no instance id to offer. Asking by the plan's bucket alone is
+ * what leaves USAGE a column of zeros while UTLIZED_QUOTA beside it looks right, because the dump
+ * falls back to the subscriber's whole CDR total for a user whose quota bucket it could not name
+ * and this has no such total to fall back to — nor should it, since a subscriber's whole usage is
+ * not one of their buckets' usage.
  *
  * <p><b>Why the username.</b> The aggregation is grouped by {@code userName}, because that is what
  * a CDR document is keyed on, so the bucket the row describes is reached through the subscriber
@@ -32,9 +44,9 @@ import java.sql.ResultSet;
  * <p><b>Reading an empty USAGE against a 0.</b> Deliberately the same distinction the dump
  * documents, because it is the same lookup. Empty is a row whose subscriber has no session document
  * anywhere in the scan — nothing was found to report. 0 is a subscriber who was found, holding a
- * bucket none of their session instances name: either nothing has been drawn from that bucket, or
- * the id the CDR keys usage on is not BUCKET_INSTANCE.BUCKET_ID. Neither can be told from the other
- * in the file, so both are counted and reported when the run ends.
+ * bucket none of their session instances name under either id, or holding one whose usage the CDRs
+ * split by bundle and gave none of to this row's bundle. Neither can be told from the other in the
+ * file, so both are counted and reported when the run ends.
  */
 @Slf4j
 public class BucketUsageColumnSource implements ExtractColumnSource {
@@ -48,6 +60,7 @@ public class BucketUsageColumnSource implements ExtractColumnSource {
     private final int usageSlot;
     private final int serviceIdSlot;
     private final int bucketIdSlot;
+    private final int bucketInstanceIdSlot;
 
     /** The username whose figures are held, and the figures — one user's worth, never more. */
     private String userName;
@@ -57,6 +70,7 @@ public class BucketUsageColumnSource implements ExtractColumnSource {
     private long withoutLookupKey;
     private long withoutCdrUsage;
     private long withUnknownBucket;
+    private long keyedByInstanceId;
     private long withBucketAndUsage;
     private long scopedToBundle;
 
@@ -76,6 +90,7 @@ public class BucketUsageColumnSource implements ExtractColumnSource {
         this.usageSlot = spec.csvIndex(TableExtracts.USAGE_COLUMN);
         this.serviceIdSlot = spec.csvIndex(TableExtracts.SERVICE_ID_COLUMN);
         this.bucketIdSlot = spec.csvIndex(TableExtracts.BUCKET_ID_COLUMN);
+        this.bucketInstanceIdSlot = spec.csvIndex(TableExtracts.BUCKET_INSTANCE_ID_COLUMN);
     }
 
     @Override
@@ -108,9 +123,11 @@ public class BucketUsageColumnSource implements ExtractColumnSource {
         }
 
         String bucketId = row[bucketIdSlot];
-        if (bucketId == null || bucketId.isEmpty()) {
-            // Nothing to ask about. The subscriber's total across their buckets is what an
-            // unnamed bucket would otherwise be given, and that is not this row's usage.
+        String bucketInstanceId = row[bucketInstanceIdSlot];
+        if ((bucketId == null || bucketId.isEmpty())
+                && (bucketInstanceId == null || bucketInstanceId.isEmpty())) {
+            // Nothing to ask about under either id. The subscriber's total across their buckets is
+            // what an unnamed bucket would otherwise be given, and that is not this row's usage.
             row[usageSlot] = null;
             withoutLookupKey++;
             return;
@@ -122,25 +139,28 @@ public class BucketUsageColumnSource implements ExtractColumnSource {
         // scope-to-service switches off.
         String serviceId = scopeToService ? row[serviceIdSlot] : null;
 
-        row[usageSlot] = Long.toString(current.usageOn(serviceId, bucketId));
-        count(serviceId, bucketId);
+        row[usageSlot] = Long.toString(current.usageOn(serviceId, bucketId, bucketInstanceId));
+        count(serviceId, bucketId, bucketInstanceId);
     }
 
     /**
      * Tallies where the figure just written came from, for the lines logged when the run ends: no
-     * CDR record for the subscriber at all, a bucket the CDRs never name, and — where there is
-     * both — the row's own bundle rather than the bucket's total across bundles. Two map probes per
-     * row rather than a record per row: this runs once for every bucket instance in the database.
+     * CDR record for the subscriber at all, a bucket the CDRs never name under either id, which of
+     * the two ids they did name it under, and — where there is both a bucket and usage — the row's
+     * own bundle rather than one of the fallbacks. A few map probes per row rather than a record
+     * per row: this runs once for every bucket instance in the database.
      */
-    private void count(String serviceId, String bucketId) {
-        if (!current.knowsBucket(bucketId)) {
+    private void count(String serviceId, String bucketId, String bucketInstanceId) {
+        if (!current.knowsBucket(bucketId, bucketInstanceId)) {
             withUnknownBucket++;
+        } else if (!Objects.equals(current.bucketKey(bucketId, bucketInstanceId), bucketId)) {
+            keyedByInstanceId++;
         }
         if (serviceId == null) {
             return;
         }
         withBucketAndUsage++;
-        if (current.attributedTo(serviceId, bucketId)) {
+        if (current.attributedTo(serviceId, bucketId, bucketInstanceId)) {
             scopedToBundle++;
         }
     }
@@ -148,11 +168,13 @@ public class BucketUsageColumnSource implements ExtractColumnSource {
     /**
      * Closes the aggregation cursor and reports what the column was filled from.
      *
-     * <p>Both lines answer questions the file cannot. A run where every row came out empty is not a
+     * <p>The lines answer questions the file cannot. A run where every row came out empty is not a
      * quiet subscriber base — it is a run whose usernames are not the ones the CDR documents are
-     * keyed on, or whose scan covers days the sessions are not in. A run where every row fell back
-     * to the bucket's total across bundles is one whose CDRs do not carry SERVICE_INSTANCE.ID, and
-     * {@code scope-to-service: false} is then the honest setting until they do.
+     * keyed on, or whose scan covers days the sessions are not in. A run where every row holds a
+     * bucket the CDRs never name is one whose session instances key usage on neither of the two ids
+     * BUCKET_INSTANCE carries. A run where every row fell back to the bucket's total across bundles
+     * is one whose CDRs do not carry SERVICE_INSTANCE.ID, and {@code scope-to-service: false} is
+     * then the honest setting until they do.
      */
     @Override
     public void close() throws Exception {
@@ -166,10 +188,16 @@ public class BucketUsageColumnSource implements ExtractColumnSource {
                             + "look up — a service that no longer resolves, or no bucket id — and "
                             + "are empty as well",
                     rows, withoutCdrUsage, withUnknownBucket, withoutLookupKey);
+            if (keyedByInstanceId > 0) {
+                log.info("BUCKET_INSTANCE read USAGE for {} row(s) under the bucket instance's "
+                                + "own ID rather than under BUCKET_ID, which is the id this "
+                                + "cluster's session instances key usage on",
+                        keyedByInstanceId);
+            }
             if (scopeToService && withBucketAndUsage > 0) {
                 log.info("BUCKET_INSTANCE took USAGE from the row's own bundle for {} of {} row(s) "
-                                + "with both a bucket and CDR usage, and from the bucket's total "
-                                + "across bundles for the rest",
+                                + "with both a bucket and CDR usage; the rest drew nothing the "
+                                + "CDRs attribute to that bundle",
                         scopedToBundle, withBucketAndUsage);
             }
         } finally {

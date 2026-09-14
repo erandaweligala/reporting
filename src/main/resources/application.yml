@@ -252,7 +252,11 @@ report:
       # false to report the bucket's total across every bundle that drew on it; the dump logs per
       # shard how many rows already had to fall back to that.
       scope-to-service: true
-      services-per-user: 10      # bundles weighed against one of a user's buckets
+      # Bundles weighed against one of a user's buckets. It also decides when a bucket's split
+      # can be read as the whole of who drew on it: a split returned in full lets a bundle missing
+      # from it report 0, while a truncated one falls back to the bucket's total across bundles.
+      # BUCKET_INSTANCE.USAGE is what notices, since it asks once per bucket instance.
+      services-per-user: 10
       nas-addresses-per-user: 5  # distinct NAS addresses weighed before NAS_IP_ADDRESS is picked
       nas-ip-field: nasIpAddress.keyword
       nested: true               # sessionInstances is mapped as a nested type

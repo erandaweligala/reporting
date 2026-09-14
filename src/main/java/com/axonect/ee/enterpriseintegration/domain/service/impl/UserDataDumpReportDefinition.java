@@ -313,19 +313,21 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     /**
      * Reports how much of the shard's UTLIZED_QUOTA was the reported bundle's own usage.
      *
-     * <p>The fallback — a bucket's total across every bundle that drew on it — is a plausible
-     * looking number, so a wrong assumption about the CDR's serviceId cannot be seen in the file.
-     * It can be seen here: a shard that attributed none of its rows is a shard whose session
-     * instances are not keyed by SERVICE_INSTANCE.ID, and {@code scope-to-service: false} is then
-     * the honest setting until they are.
+     * <p>The rest is either a bundle that drew nothing from its quota bucket — a cycle taken out
+     * since the last delta cdr-service recorded — or the bucket's total across every bundle that
+     * drew on it, which is what the figure degrades to where the CDRs name no bundle the database
+     * recognises. That fallback is a plausible looking number, so a wrong assumption about the
+     * CDR's serviceId cannot be seen in the file. It can be seen here: a shard that attributed
+     * none of its rows is a shard whose session instances are not keyed by SERVICE_INSTANCE.ID,
+     * and {@code scope-to-service: false} is then the honest setting until they are.
      */
     private void logQuotaAttribution(UsernameRange range, MacCollapsingWriter rows) {
         if (!properties.getUsage().isScopeToService() || rows.withQuotaBucket() == 0) {
             return;
         }
         log.info("Shard [{} .. {}) took UTLIZED_QUOTA from the reported bundle's own usage for {} "
-                        + "of {} user(s) with both a quota bucket and CDR usage, and from the "
-                        + "bucket's total across bundles for the rest",
+                        + "of {} user(s) with both a quota bucket and CDR usage; the rest drew "
+                        + "nothing the CDRs attribute to that bundle",
                 range.fromInclusive(), range.toExclusive(),
                 rows.scopedToBundle(), rows.withQuotaBucket());
     }

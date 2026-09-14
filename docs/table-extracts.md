@@ -63,12 +63,28 @@ today's among them, because a bucket taken out this morning has drawn all it has
 index cdr-service is writing into. `usage.lookback-days` bounds that scan for a cluster that keeps
 years of indices.
 
-Each row asks for its own bucket's share by the pair it already carries: `BUCKET_ID` and
-`SERVICE_ID`. Both are needed. A bucket id names the *plan's* bucket rather than one instance of
+Each row asks for its own bucket's share by the keys it already carries: `SERVICE_ID`, and the
+bucket under either of the two ids the row holds for it.
+
+**The bundle: `SERVICE_ID`.** A bucket id names the *plan's* bucket rather than one instance of
 it — a subscriber on a recurring plan draws on the same id cycle after cycle — so a total keyed on
 it alone would report a year of renewals against every one of that subscriber's rows.
 `usage.scope-to-service` is what splits it by the `serviceId` on each session instance, which is
-what `BUCKET_INSTANCE.SERVICE_ID` points at.
+what `BUCKET_INSTANCE.SERVICE_ID` points at. Where the CDRs did split a bucket by bundle and gave
+none of it to this row's, the row drew nothing and reports `0`; the bucket's total across bundles
+is reported only where there is no split to read at all — the `serviceId` is not one the database
+recognises, or more bundles touched the bucket than `usage.services-per-user` has room for — since
+then nothing is known about who drew what and an unscoped total is at least a real figure.
+
+**The bucket: `BUCKET_ID`, then `ID`.** A session instance's `bucketId` is
+`BUCKET_INSTANCE.BUCKET_ID` on one deployment and `BUCKET_INSTANCE.ID` on another, and the two
+cannot be told apart by looking at a value. This extract is a row of that table, so it holds both
+and offers both: the plan's bucket first, because that is the id the user data dump has to ask by,
+and the row's own id where the CDRs named that instead. Asking by the plan's bucket alone is what
+leaves this column a file of zeros while `UTLIZED_QUOTA` beside it looks right — the dump falls
+back to the subscriber's whole CDR total for a user whose quota bucket it could not name, and this
+must not, since a subscriber's whole usage is not one of their buckets' usage. The run says which
+of the two ids answered.
 
 **How the two sides meet.** cdr-service groups its documents by `userName`, so a bucket's usage is
 reached through the subscriber holding its service rather than by the bucket's own id — which is
@@ -109,25 +125,32 @@ documents for `UTLIZED_QUOTA`, because it is the same lookup:
 scan, or a row that carries nothing to look one up by — a `SERVICE_ID` that resolves to no service
 instance, or no `BUCKET_ID`.
 
-**0** is a subscriber who *was* found, holding a bucket none of their session instances name. One
-such row is a bucket nothing has been drawn from — a bandwidth bucket, which no CDR keys usage on,
-is reported as 0 for exactly that reason. A whole file of them is the tell that the id the CDR keys
-usage on is not `BUCKET_INSTANCE.BUCKET_ID`.
+**0** is a subscriber who *was* found, and it means one of two things: a bucket none of their
+session instances name under either id, or a bucket whose usage the CDRs did split by bundle and
+gave none of to this row's bundle. Both are ordinary — a bandwidth bucket, which no CDR keys usage
+on, is a 0 of the first kind; a cycle taken out since the last delta cdr-service recorded is a 0 of
+the second. A whole file of the first kind is the tell that the id the CDRs key usage on is neither
+`BUCKET_INSTANCE.BUCKET_ID` nor `BUCKET_INSTANCE.ID`.
 
-Neither can be told from the other in the file, so the run counts both and says so when it ends:
+Neither can be told from the other in the file, so the run counts them and says so when it ends:
 
 ```
 BUCKET_INSTANCE took USAGE from the CDR session documents for 3182044 row(s): 118 found no CDR
 usage at all, whose USAGE is empty, 902 hold a bucket their CDRs never name, whose USAGE is 0, and
 3 carry nothing to look up — a service that no longer resolves, or no bucket id — and are empty as
 well
+BUCKET_INSTANCE read USAGE for 3181024 row(s) under the bucket instance's own ID rather than under
+BUCKET_ID, which is the id this cluster's session instances key usage on
 BUCKET_INSTANCE took USAGE from the row's own bundle for 3181021 of 3181024 row(s) with both a
-bucket and CDR usage, and from the bucket's total across bundles for the rest
+bucket and CDR usage; the rest drew nothing the CDRs attribute to that bundle
 ```
 
-A run reporting the second line's fallback for most of its rows is a deployment whose CDRs do not
-carry `SERVICE_INSTANCE.ID` in `serviceId`; `scope-to-service: false` is the honest setting until
-they do, and it reports the bucket's total across bundles for every row rather than for some.
+The second line appears only where the row's own `ID` is what answered, and a run that logs it for
+most of its rows is a deployment whose cdr-service keys usage on the bucket instance rather than on
+the plan's bucket — which is the case that used to leave `USAGE` a column of zeros. A run
+attributing few of its rows on the third line is one whose CDRs do not carry `SERVICE_INSTANCE.ID`
+in `serviceId`; `scope-to-service: false` is the honest setting until they do, and it reports the
+bucket's total across bundles for every row rather than leaving some at 0.
 
 Two caps bound what one subscriber can be asked for: `usage.buckets-per-user` (20) and
 `usage.services-per-user` (10). A subscriber whose CDRs name more buckets than that has the rest
