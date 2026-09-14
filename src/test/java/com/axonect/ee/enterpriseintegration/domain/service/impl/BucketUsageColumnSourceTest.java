@@ -35,7 +35,10 @@ class BucketUsageColumnSourceTest {
     private static final int SERVICE_ID = SPEC.csvIndex(TableExtracts.SERVICE_ID_COLUMN);
     private static final int BUCKET_ID = SPEC.csvIndex(TableExtracts.BUCKET_ID_COLUMN);
     private static final int BUCKET_INSTANCE_ID = SPEC.csvIndex(TableExtracts.BUCKET_INSTANCE_ID_COLUMN);
+    private static final int BUCKET_TYPE = SPEC.csvIndex(TableExtracts.BUCKET_TYPE_COLUMN);
 
+    /** BUCKET_INSTANCE.BUCKET_TYPE of the quota bucket, as report.user-dump reads it. */
+    private static final String QUOTA_TYPE = "DATA";
     private static final String BUCKET = "SLT_DATA_100GB";
     /** BUCKET_INSTANCE.ID of the row: the other id a session instance's bucketId can be. */
     private static final String INSTANCE = "BI-77";
@@ -222,6 +225,94 @@ class BucketUsageColumnSourceTest {
     }
 
     @Test
+    void aSubscriberWithNoPerBucketSplitReportsTheFigureTheDumpReportsAsUtlizedQuota() throws Exception {
+        // sessionInstances is not mapped as nested, so Elasticsearch can sum what the subscriber
+        // drew and nothing finer. That total is what the dump reports for them as UTLIZED_QUOTA,
+        // so it is what the bucket behind that quota reports as USAGE — the two files are read
+        // against each other, and this column falling back to the table's own counter here is what
+        // left it at 0 beside a UTLIZED_QUOTA of 10 for the same subscriber.
+        BucketUsageColumnSource source = source(cursorOf(unsplit("taiwowilliams", 10L)), true);
+
+        String[] row = row("svc-1", BUCKET, INSTANCE);
+        source.fill(resultSet("taiwowilliams"), row);
+
+        assertEquals("10", row[USAGE]);
+    }
+
+    @Test
+    void thatTotalIsReportedAgainstOneBucketRatherThanEachOfThem() throws Exception {
+        // It covers every bucket the subscriber has, so writing it against each would read as
+        // their usage several times over. The statement orders a subscriber's rows live cycle
+        // first, so the one that takes it is the current bucket and the expired cycles report 0.
+        BucketUsageColumnSource source = source(cursorOf(unsplit("taiwowilliams", 10L)), true);
+
+        String[] live = row("svc-2", BUCKET, "BI-2");
+        String[] lastCycle = row("svc-1", BUCKET, "BI-1");
+        source.fill(resultSet("taiwowilliams"), live);
+        source.fill(resultSet("taiwowilliams"), lastCycle);
+
+        assertEquals("10", live[USAGE]);
+        assertEquals("0", lastCycle[USAGE], "one figure, one row — not the same total twice");
+    }
+
+    @Test
+    void aBucketThatHoldsNoQuotaIsNotTheOneThatTotalIsReportedAgainst() throws Exception {
+        // The dump reports UTLIZED_QUOTA against the data quota bucket, so that is the bucket this
+        // reports the same figure against. A bandwidth bucket draws no data usage and does not
+        // take it, even when it is the row that arrives first.
+        BucketUsageColumnSource source = source(cursorOf(unsplit("taiwowilliams", 10L)), true);
+
+        String[] bandwidth = row("svc-1", "FTTH_50Mbps", "BI-1", "BANDWIDTH");
+        String[] quota = row("svc-1", BUCKET, "BI-2");
+        source.fill(resultSet("taiwowilliams"), bandwidth);
+        source.fill(resultSet("taiwowilliams"), quota);
+
+        assertEquals("0", bandwidth[USAGE]);
+        assertEquals("10", quota[USAGE]);
+    }
+
+    @Test
+    void theBucketTypeIsMatchedWhateverCaseTheDatabaseSpellsItIn() throws Exception {
+        // BUCKET_TYPE is 'Data' on a deployment whose quota-bucket-type is configured as 'DATA'.
+        // The comparison here decides where a figure is reported, not what it is, so it is the
+        // forgiving one — a case that did not match would leave the figure nowhere.
+        BucketUsageColumnSource source = source(cursorOf(unsplit("taiwowilliams", 10L)), true);
+
+        String[] row = row("svc-1", BUCKET, INSTANCE, "Data");
+        source.fill(resultSet("taiwowilliams"), row);
+
+        assertEquals("10", row[USAGE]);
+    }
+
+    @Test
+    void eachSubscriberGetsTheirOwnTotalOnceTheirOwnBucketIsReached() throws Exception {
+        BucketUsageColumnSource source = source(cursorOf(
+                unsplit("taiwowilliams", 10L), unsplit("zuhayrmohamed", 431L)), true);
+
+        String[] first = row("svc-1", BUCKET, "BI-1");
+        String[] second = row("svc-2", BUCKET, "BI-2");
+        source.fill(resultSet("taiwowilliams"), first);
+        source.fill(resultSet("zuhayrmohamed"), second);
+
+        assertEquals("10", first[USAGE]);
+        assertEquals("431", second[USAGE], "the next subscriber's total is their own");
+    }
+
+    @Test
+    void aSplitTheCdrsDoCarryStillGivesEveryBucketItsOwnFigure() throws Exception {
+        // The subscriber total stands in for one bucket's usage only where there is no split to
+        // contradict it. Where there is one, a bucket the CDRs never name is still a 0 and not the
+        // whole of what the subscriber drew.
+        BucketUsageColumnSource source = source(cursorOf(
+                user("taiwowilliams", Map.of("SLT_NIGHT_50GB", 120L), Map.of())), true);
+
+        String[] row = row("svc-1", BUCKET, INSTANCE);
+        source.fill(resultSet("taiwowilliams"), row);
+
+        assertEquals("0", row[USAGE]);
+    }
+
+    @Test
     void closesTheAggregationCursorWhenTheRunEnds() throws Exception {
         BucketUsageColumnSource source = source(cursorOf(), true);
 
@@ -231,7 +322,7 @@ class BucketUsageColumnSourceTest {
     }
 
     private BucketUsageColumnSource source(UserUsageCursor cursor, boolean scopeToService) {
-        return new BucketUsageColumnSource(SPEC, cursor, scopeToService);
+        return new BucketUsageColumnSource(SPEC, cursor, scopeToService, QUOTA_TYPE);
     }
 
     /** The aggregation as Elasticsearch hands it out: one user at a time, in username order. */
@@ -257,6 +348,14 @@ class BucketUsageColumnSourceTest {
         return new UserUsage(userName, perBucket, perServiceBucket, total, true, null);
     }
 
+    /**
+     * A user whose CDR usage carries no per-bucket split at all, which is what a flattened
+     * sessionInstances mapping hands back: the whole of what they drew, and nothing finer.
+     */
+    private static UserUsage unsplit(String userName, long total) {
+        return new UserUsage(userName, Map.of(), Map.of(), total, false, null);
+    }
+
     /** A user one of whose buckets the CDRs split by bundle in full, and the split. */
     private static UserUsage split(String userName, String bucketId, long total,
                                    Map<String, Long> perServiceBucket) {
@@ -270,10 +369,16 @@ class BucketUsageColumnSourceTest {
     }
 
     private static String[] row(String serviceId, String bucketId, String bucketInstanceId) {
+        return row(serviceId, bucketId, bucketInstanceId, QUOTA_TYPE);
+    }
+
+    private static String[] row(String serviceId, String bucketId, String bucketInstanceId,
+                                String bucketType) {
         String[] row = new String[SPEC.columns().size()];
         row[SERVICE_ID] = serviceId;
         row[BUCKET_ID] = bucketId;
         row[BUCKET_INSTANCE_ID] = bucketInstanceId;
+        row[BUCKET_TYPE] = bucketType;
         return row;
     }
 

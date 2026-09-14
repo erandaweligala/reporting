@@ -52,47 +52,48 @@ public class TableExtractReportsConfig {
             UserDumpProperties usageProperties,
             UsageAggregationClient usageAggregationClient) {
 
-        if (!usageFromCdr(properties, usageProperties.getUsage())) {
+        if (!usageFromCdr(properties, usageProperties)) {
             return new TableExtractReportDefinition(TableExtracts.BUCKET_INSTANCE, rowReader, properties);
         }
 
         Spec spec = TableExtracts.BUCKET_INSTANCE_FROM_CDR;
         boolean scopeToService = usageProperties.getUsage().isScopeToService();
+        String quotaBucketType = usageProperties.getQuotaBucketType();
 
         // A cursor per run, opened when the extract starts and closed with it. The extract is not
         // sharded, so the one cursor covers the whole username keyspace.
         return new TableExtractReportDefinition(spec, rowReader, properties,
                 () -> new BucketUsageColumnSource(
-                        spec, usageAggregationClient.openBucketTotals(null, null), scopeToService));
+                        spec, usageAggregationClient.openBucketTotals(null, null), scopeToService,
+                        quotaBucketType));
     }
 
     /**
      * Whether BUCKET_INSTANCE.USAGE will be the CDR total, and why if not.
      *
-     * <p>Two things besides the switch itself can take it away, and both of them would otherwise
-     * produce a column that looks right and is not:
+     * <p>The rule is that this column reports whatever UTLIZED_QUOTA reports, so the two files can
+     * be reconciled row for row. It follows that the only thing that can take the CDR figure away
+     * from this extract is the thing that takes it away from the dump as well: an Elasticsearch
+     * lookup that is switched off, which has no figures for either report.
      *
-     * <ul>
-     *   <li>An Elasticsearch lookup that is switched off returns no figures at all, which would
-     *       empty the column for every row rather than fail the run.</li>
-     *   <li>A {@code sessionInstances} array that is not mapped as nested cannot be summed per
-     *       bucket — Elasticsearch flattens it, so the only figure available is the subscriber's
-     *       whole usage, and writing that against each of their buckets would read as a total
-     *       several times over. Fixing the mapping is what gets the column back.</li>
-     * </ul>
+     * <p>A {@code sessionInstances} array that is not mapped as nested used to take it away too,
+     * because Elasticsearch flattens such an array and the only figure it can then give back is the
+     * subscriber's whole usage — which against each of their buckets would read as that total
+     * several times over. Falling back to the table's own counter for it is what left USAGE at 0
+     * beside a UTLIZED_QUOTA that was reporting the CDR total for the very same subscriber. The
+     * extract now reports that total the way the dump does and writes it against one bucket rather
+     * than all of them, so the mapping no longer decides which of two unrelated figures the column
+     * carries — only how exact it is. See {@link BucketUsageColumnSource}.
      *
-     * <p>Either way the extract keeps reporting the table's own counter, and says so in the startup
-     * log — the file itself cannot show which of the two figures it carries.
+     * <p>Which of the two a run reports is in the startup log — the file itself cannot show it.
      */
-    private boolean usageFromCdr(TableExtractProperties properties, UserDumpProperties.Usage usage) {
+    private boolean usageFromCdr(TableExtractProperties properties, UserDumpProperties dump) {
+        UserDumpProperties.Usage usage = dump.getUsage();
         String reason = null;
         if (!properties.isUsageFromCdr()) {
             reason = "report.table-extract.usage-from-cdr is off";
         } else if (!usage.isEnabled()) {
             reason = "report.user-dump.usage.enabled is off, so there are no CDR figures to read";
-        } else if (!usage.isNested()) {
-            reason = "report.user-dump.usage.nested is off, so CDR usage cannot be attributed to "
-                    + "one bucket";
         }
 
         if (reason != null) {
@@ -103,6 +104,15 @@ public class TableExtractReportsConfig {
                         + "bundle each bucket belongs to — the figure USER_DATA_DUMP reports as "
                         + "UTLIZED_QUOTA",
                 usage.getIndex(), usage.isScopeToService() ? "scoped" : "unscoped");
+        if (!usage.isNested()) {
+            log.info("BUCKET_INSTANCE.USAGE cannot be split per bucket: "
+                            + "report.user-dump.usage.nested is off, so each subscriber's whole "
+                            + "CDR total — the figure USER_DATA_DUMP reports for them as "
+                            + "UTLIZED_QUOTA — is reported against their {} bucket and their other "
+                            + "buckets report 0. Mapping sessionInstances as nested is what makes "
+                            + "the column per-bucket again",
+                    dump.getQuotaBucketType());
+        }
         return true;
     }
 }

@@ -38,6 +38,15 @@ public final class TableExtracts {
     /** The SERVICE_INSTANCE the bucket belongs to, which is the bundle the usage is scoped to. */
     public static final String SERVICE_ID_COLUMN = "SERVICE_ID";
     /**
+     * What kind of bucket the row is, which is what says whether it can hold data usage at all.
+     *
+     * <p>It is read for one case only: a subscriber whose CDR usage carries no per-bucket split,
+     * where the whole of what they have drawn is the only figure there is and the quota bucket is
+     * the one row of theirs it belongs against — the same bucket the user data dump reports that
+     * figure against as UTLIZED_QUOTA. See {@code BucketUsageColumnSource}.
+     */
+    public static final String BUCKET_TYPE_COLUMN = "BUCKET_TYPE";
+    /**
      * Helper column of {@link #BUCKET_INSTANCE_FROM_CDR}: the username that service is held by,
      * which is what the CDR documents are grouped under. It is read from the row and not written
      * to the file — BUCKET_INSTANCE carries no username column and must not start carrying one.
@@ -149,6 +158,13 @@ public final class TableExtracts {
      *       order and the two sides are merge-joined, so neither has to be held in memory — which
      *       is the only reason an extract pays for an ORDER BY. NULLS LAST puts the buckets whose
      *       service did not resolve past the end of the merge rather than in front of it.</li>
+     *   <li><b>A subscriber's own rows are ordered too.</b> The live bucket first: latest
+     *       expiration, then highest id to break a tie. The merge needs only the username, but a
+     *       subscriber whose CDR usage carries no per-bucket split has one figure to report and
+     *       one row to report it against, and this is what makes that row the current cycle's
+     *       bucket rather than whichever cycle the table happened to hand over first. The sort is
+     *       already being paid for; two more keys inside each username are the rest of a sort that
+     *       is happening anyway.</li>
      * </ul>
      */
     public static final Spec BUCKET_INSTANCE_FROM_CDR = new Spec(
@@ -156,7 +172,7 @@ public final class TableExtracts {
             "BUCKET_INSTANCE b LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID",
             bucketInstanceColumns(Column.spliced(USAGE_COLUMN)),
             List.of(Column.plain(USER_NAME_HELPER, "si.USERNAME")),
-            "si.USERNAME NULLS LAST");
+            "si.USERNAME NULLS LAST, b.EXPIRATION DESC NULLS LAST, b.ID DESC");
 
     /**
      * Every extract, in the order they are registered — with BUCKET_INSTANCE as it reads the

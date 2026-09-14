@@ -79,9 +79,12 @@ class TableExtractsTest {
                 "a bucket whose service no longer resolves is still a row of the table");
         assertEquals(List.of("USER_NAME"), spec.helpers().stream().map(Column::label).toList());
         assertEquals("si.USERNAME", spec.helpers().get(0).source());
-        assertEquals("si.USERNAME NULLS LAST", spec.orderBy(),
+        assertEquals("si.USERNAME NULLS LAST, b.EXPIRATION DESC NULLS LAST, b.ID DESC",
+                spec.orderBy(),
                 "the aggregation is handed out in username order, so the rows are merge-joined "
-                        + "against it in that order — with the unresolved services past the end");
+                        + "against it in that order — with the unresolved services past the end — "
+                        + "and a subscriber's own buckets arrive live cycle first, which is the "
+                        + "one a figure that covers all of them is reported against");
         assertFalse(labelsOf(spec).contains("USER_NAME"),
                 "the username is read from the row and never written to the file");
     }

@@ -84,13 +84,18 @@ class TableExtractReportsConfigTest {
     }
 
     @Test
-    void aFlattenedSessionInstancesMappingFallsBackToTheColumnToo() throws Exception {
+    void aFlattenedSessionInstancesMappingStillReportsTheFigureTheDumpReports() throws Exception {
         // Elasticsearch flattens an array that is not mapped as nested, so the only figure it can
-        // give back is the subscriber's whole usage — which against each of their buckets would
-        // read as that total several times over.
+        // give back is the subscriber's whole usage. That is exactly what the dump reports for them
+        // as UTLIZED_QUOTA, so the extract reports it too — against one bucket of theirs rather
+        // than all of them. Falling back to the table's own counter here is what left USAGE at 0
+        // beside a UTLIZED_QUOTA read from the CDRs for the same subscriber.
         usageProperties.getUsage().setNested(false);
 
-        assertTrue(runBucketExtract().contains("b.USAGE"));
+        String sql = runBucketExtract();
+
+        assertFalse(sql.contains("b.USAGE"), "the table's own counter is a different figure");
+        verify(usageAggregationClient).openBucketTotals(null, null);
     }
 
     @Test
@@ -126,8 +131,6 @@ class TableExtractReportsConfigTest {
     }
 
     private boolean readsTheCdrTotal() {
-        return properties.isUsageFromCdr()
-                && usageProperties.getUsage().isEnabled()
-                && usageProperties.getUsage().isNested();
+        return properties.isUsageFromCdr() && usageProperties.getUsage().isEnabled();
     }
 }
