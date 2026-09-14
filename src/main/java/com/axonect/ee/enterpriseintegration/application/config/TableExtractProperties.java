@@ -11,6 +11,9 @@ import org.springframework.stereotype.Component;
  * what removes the Oracle round trips from the cost of the scan and the buffer is what keeps the
  * writer down to roughly one write syscall per thousand rows. They are safe for the small one too:
  * a buffer is allocated per running extract, not per row.
+ *
+ * <p>One setting is not tuning: {@link #usageFromCdr} decides where BUCKET_INSTANCE.USAGE is read
+ * from, and so what that column of that extract means.
  */
 @Component
 @ConfigurationProperties(prefix = "report.table-extract")
@@ -41,6 +44,29 @@ public class TableExtractProperties {
      * operator sees and would only put the two sides of that switch out of step with each other.
      */
     private String dateFormat = "YYYY-MM-DD HH24:MI:SS";
+
+    /**
+     * Whether BUCKET_INSTANCE.USAGE reports what the CDR session documents in Elasticsearch say the
+     * bucket has drawn, instead of the table's own USAGE column. It is the figure the user data dump
+     * reports as UTLIZED_QUOTA, for the bucket each row of the extract is.
+     *
+     * <p>On, because that is what the consuming system reads the column as: the usage of the bucket,
+     * summed from the deltas cdr-service records against it, next to the balance columns the table
+     * holds. The table's counter is what AAA itself has managed to write back, which is the figure
+     * the CDRs are the record of rather than a second opinion on it.
+     *
+     * <p>Off — and the fallback whenever the CDR lookup cannot produce a per-bucket figure at all,
+     * which is {@code report.user-dump.usage.enabled: false} or a {@code sessionInstances} mapping
+     * that is not nested — reports BUCKET_INSTANCE.USAGE as it stands. Which of the two a run used
+     * is in the startup log and not in the file, so it is a deployment-wide setting rather than
+     * something a request can ask for.
+     *
+     * <p>Everything about the CDR figure itself is configured once, under
+     * {@code report.user-dump.usage}: the indices it is summed over, whether it is scoped to the
+     * bundle that drew it, and the page size of the aggregation. Two reports read the same figure,
+     * so there is one definition of what it is.
+     */
+    private boolean usageFromCdr = true;
 
     /**
      * Whether the timestamp columns of every extract are written in the form a spreadsheet

@@ -8,6 +8,7 @@ import com.axonect.ee.enterpriseintegration.domain.constant.TableExtractSql.Spec
 import com.axonect.ee.enterpriseintegration.domain.constant.TableExtracts;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
 import com.axonect.ee.enterpriseintegration.domain.repository.StreamingRowReader;
+import com.axonect.ee.enterpriseintegration.domain.service.ExtractColumnSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -18,6 +19,7 @@ import java.nio.file.Path;
 import java.sql.ResultSet;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,6 +40,16 @@ class TableExtractReportDefinitionTest {
             Column.plain("ID", "t.ID"),
             Column.plain("NAME", "t.NAME"),
             Column.at("CREATED_AT", "t.CREATED_AT")));
+
+    /** The shape of the bucket extract once the CDR documents fill USAGE: a column of the file
+     * the statement selects nothing for, and a helper column the row carries but the file does
+     * not. */
+    private static final Spec SPLICED_SPEC = new Spec("SPLICED", "SAMPLE_TABLE t",
+            List.of(Column.plain("ID", "t.ID"),
+                    Column.spliced("USAGE"),
+                    Column.at("UPDATED_AT", "t.UPDATED_AT")),
+            List.of(Column.plain("USER_NAME", "t.USER_NAME")),
+            null);
 
     @TempDir
     Path tempDir;
@@ -216,6 +228,78 @@ class TableExtractReportDefinitionTest {
         definition.streamTo(report(), output);
 
         assertEquals("1,Data709,2026-08-18 14:31:23", Files.readAllLines(output).get(1));
+    }
+
+    @Test
+    void aSplicedColumnIsFilledAfterTheRowIsReadAndShiftsNothingAroundIt() throws Exception {
+        // The statement selects one expression fewer than the CSV has columns, so every column
+        // after the spliced one sits one place to the left in the result set. Getting that wrong
+        // writes UPDATED_AT into USAGE rather than failing.
+        TableExtractReportDefinition extract = new TableExtractReportDefinition(
+                SPLICED_SPEC, rowReader, properties,
+                () -> (resultSet, row) -> row[1] = "spliced:" + resultSet.getString(3));
+
+        stubReader(List.<String[]>of(new String[]{"712", "2026-08-18 14:31:23", "taiwowilliams"}));
+
+        Path output = tempDir.resolve("spliced.csv");
+        Files.writeString(output, header(extract) + System.lineSeparator());
+        extract.streamTo(report(), output);
+
+        assertEquals(List.of("ID,USAGE,UPDATED_AT",
+                        "712,spliced:taiwowilliams,=\"2026-08-18 14:31:23\""),
+                Files.readAllLines(output));
+    }
+
+    @Test
+    void theSplicedColumnSourceIsOpenedOncePerRunAndClosedWithIt() throws Exception {
+        // It holds an Elasticsearch cursor for the run, so a source that outlived one run would
+        // hand the next run a stream already past every username it wants.
+        AtomicInteger opened = new AtomicInteger();
+        AtomicInteger closed = new AtomicInteger();
+        TableExtractReportDefinition extract = new TableExtractReportDefinition(
+                SPLICED_SPEC, rowReader, properties,
+                () -> {
+                    opened.incrementAndGet();
+                    return new ExtractColumnSource() {
+                        @Override
+                        public void fill(ResultSet resultSet, String[] row) {
+                            row[1] = "0";
+                        }
+
+                        @Override
+                        public void close() {
+                            closed.incrementAndGet();
+                        }
+                    };
+                });
+
+        stubReader(List.of());
+        Path output = tempDir.resolve("source-lifecycle.csv");
+        Files.writeString(output, header(extract) + System.lineSeparator());
+
+        extract.streamTo(report(), output);
+        extract.streamTo(report(), output);
+
+        assertEquals(2, opened.get());
+        assertEquals(2, closed.get());
+    }
+
+    @Test
+    void anExtractWithAnOrderingReadsItInTheDatabasesBinaryCollation() throws Exception {
+        // The ordering exists to agree with the one Elasticsearch hands its aggregation out in. A
+        // session that defaulted to a linguistic sort would mismatch usernames silently, so this
+        // is the one extract that pays for the extra round trip.
+        TableExtractReportDefinition extract = new TableExtractReportDefinition(
+                TableExtracts.BUCKET_INSTANCE_FROM_CDR, rowReader, properties);
+        when(rowReader.streamInBinaryOrder(any(), anyInt(), anyInt(), any())).thenReturn(0L);
+
+        Path output = tempDir.resolve("ordered.csv");
+        Files.writeString(output, header(extract) + System.lineSeparator());
+        extract.streamTo(report(), output);
+
+        verify(rowReader).streamInBinaryOrder(any(), eq(properties.getJdbcFetchSize()),
+                eq(properties.getQueryTimeoutSeconds()), any());
+        verify(rowReader, never()).stream(any(), anyInt(), anyInt(), any());
     }
 
     @Test
