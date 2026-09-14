@@ -21,6 +21,19 @@ public final class TableExtracts {
     public static final String PLAN_TO_BUCKET_TYPE = "PLAN_TO_BUCKET";
     public static final String BUCKET_INSTANCE_TYPE = "BUCKET_INSTANCE";
 
+    /** The bucket extract's usage column, which is either the table's counter or the CDR total. */
+    public static final String USAGE_COLUMN = "USAGE";
+    /** The bucket's id, which is what the CDR session instances key usage on. */
+    public static final String BUCKET_ID_COLUMN = "BUCKET_ID";
+    /** The SERVICE_INSTANCE the bucket belongs to, which is the bundle the usage is scoped to. */
+    public static final String SERVICE_ID_COLUMN = "SERVICE_ID";
+    /**
+     * Helper column of {@link #BUCKET_INSTANCE_FROM_CDR}: the username that service is held by,
+     * which is what the CDR documents are grouped under. It is read from the row and not written
+     * to the file — BUCKET_INSTANCE carries no username column and must not start carrying one.
+     */
+    public static final String USER_NAME_HELPER = "USER_NAME";
+
     /**
      * The service base: one row per SERVICE_INSTANCE.
      *
@@ -93,32 +106,82 @@ public final class TableExtracts {
      * <p>Two departures from the DDL, both from the sample: {@code USAGE} is reported before
      * {@code UPDATED_AT} rather than after it, and {@code IS_UNLIMITED} is not part of the extract
      * at all even though the table carries it.
+     *
+     * <p>This is the variant that reports the table's own USAGE column. What a deployment runs by
+     * default is {@link #BUCKET_INSTANCE_FROM_CDR}, which reports the same figure the user data
+     * dump reports as UTLIZED_QUOTA; this one is what it falls back to — see
+     * {@code report.table-extract.usage-from-cdr}.
      */
     public static final Spec BUCKET_INSTANCE = new Spec(
             BUCKET_INSTANCE_TYPE,
             "BUCKET_INSTANCE b",
-            List.of(
-                    Column.plain("ID", "b.ID"),
-                    Column.plain("BUCKET_ID", "b.BUCKET_ID"),
-                    Column.plain("BUCKET_TYPE", "b.BUCKET_TYPE"),
-                    Column.plain("CARRY_FORWARD", "b.CARRY_FORWARD"),
-                    Column.plain("CARRY_FORWARD_VALIDITY", "b.CARRY_FORWARD_VALIDITY"),
-                    Column.plain("CONSUMPTION_LIMIT", "b.CONSUMPTION_LIMIT"),
-                    Column.plain("CONSUMPTION_LIMIT_WINDOW", "b.CONSUMPTION_LIMIT_WINDOW"),
-                    Column.plain("CURRENT_BALANCE", "b.CURRENT_BALANCE"),
-                    Column.at("EXPIRATION", "b.EXPIRATION"),
-                    Column.plain("INITIAL_BALANCE", "b.INITIAL_BALANCE"),
-                    Column.plain("MAX_CARRY_FORWARD", "b.MAX_CARRY_FORWARD"),
-                    Column.plain("PRIORITY", "b.PRIORITY"),
-                    Column.plain("RULE", "b.RULE"),
-                    Column.plain("SERVICE_ID", "b.SERVICE_ID"),
-                    Column.plain("TIME_WINDOW", "b.TIME_WINDOW"),
-                    Column.plain("TOTAL_CARRY_FORWARD", "b.TOTAL_CARRY_FORWARD"),
-                    Column.plain("USAGE", "b.USAGE"),
-                    Column.at("UPDATED_AT", "b.UPDATED_AT")));
+            bucketInstanceColumns(Column.plain(USAGE_COLUMN, "b.USAGE")));
 
-    /** Every extract, in the order they are registered. */
+    /**
+     * The same extract with {@code USAGE} read from the CDR session documents in Elasticsearch
+     * instead of from BUCKET_INSTANCE.USAGE — the figure the user data dump reports as
+     * UTLIZED_QUOTA, for the bucket each row is.
+     *
+     * <p>Three things follow from where that figure lives, and all three are in this spec:
+     *
+     * <ul>
+     *   <li><b>USAGE is spliced, not selected.</b> The statement reads nothing in that position,
+     *       the way the dump statement reads nothing for NAS_IP_ADDRESS. Selecting the table's
+     *       counter and overwriting it would leave a statement that says it reads a column the
+     *       extract does not report.</li>
+     *   <li><b>The username is joined in.</b> cdr-service groups its session documents by
+     *       {@code userName}, so a bucket's usage is asked for by the username holding the service
+     *       rather than by the bucket's own id. BUCKET_INSTANCE has no username, so
+     *       SERVICE_INSTANCE is LEFT joined for it — left, because a bucket whose service no longer
+     *       resolves is still a row of the table and still belongs in an extract of it. It is a
+     *       {@link Spec#helpers() helper}: read from the row, never written to the file.</li>
+     *   <li><b>The rows are ordered by it.</b> Elasticsearch hands its aggregation out in username
+     *       order and the two sides are merge-joined, so neither has to be held in memory — which
+     *       is the only reason an extract pays for an ORDER BY. NULLS LAST puts the buckets whose
+     *       service did not resolve past the end of the merge rather than in front of it.</li>
+     * </ul>
+     */
+    public static final Spec BUCKET_INSTANCE_FROM_CDR = new Spec(
+            BUCKET_INSTANCE_TYPE,
+            "BUCKET_INSTANCE b LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID",
+            bucketInstanceColumns(Column.spliced(USAGE_COLUMN)),
+            List.of(Column.plain(USER_NAME_HELPER, "si.USERNAME")),
+            "si.USERNAME NULLS LAST");
+
+    /**
+     * Every extract, in the order they are registered — with BUCKET_INSTANCE as it reads the
+     * table's own USAGE column. Which of the two bucket specs a deployment actually runs is
+     * {@code TableExtractReportsConfig}'s to decide; both carry the same header, which is the part
+     * the consuming system holds anyone to.
+     */
     public static final List<Spec> ALL = List.of(MAC_SERVICE_TABLE, PLAN_TO_BUCKET, BUCKET_INSTANCE);
+
+    /**
+     * The bucket extract's columns, in the sample's order, around whichever {@code USAGE} column
+     * the run reports. Shared by both specs so that the header — the contract — cannot drift
+     * between them.
+     */
+    private static List<Column> bucketInstanceColumns(Column usage) {
+        return List.of(
+                Column.plain("ID", "b.ID"),
+                Column.plain(BUCKET_ID_COLUMN, "b.BUCKET_ID"),
+                Column.plain("BUCKET_TYPE", "b.BUCKET_TYPE"),
+                Column.plain("CARRY_FORWARD", "b.CARRY_FORWARD"),
+                Column.plain("CARRY_FORWARD_VALIDITY", "b.CARRY_FORWARD_VALIDITY"),
+                Column.plain("CONSUMPTION_LIMIT", "b.CONSUMPTION_LIMIT"),
+                Column.plain("CONSUMPTION_LIMIT_WINDOW", "b.CONSUMPTION_LIMIT_WINDOW"),
+                Column.plain("CURRENT_BALANCE", "b.CURRENT_BALANCE"),
+                Column.at("EXPIRATION", "b.EXPIRATION"),
+                Column.plain("INITIAL_BALANCE", "b.INITIAL_BALANCE"),
+                Column.plain("MAX_CARRY_FORWARD", "b.MAX_CARRY_FORWARD"),
+                Column.plain("PRIORITY", "b.PRIORITY"),
+                Column.plain("RULE", "b.RULE"),
+                Column.plain(SERVICE_ID_COLUMN, "b.SERVICE_ID"),
+                Column.plain("TIME_WINDOW", "b.TIME_WINDOW"),
+                Column.plain("TOTAL_CARRY_FORWARD", "b.TOTAL_CARRY_FORWARD"),
+                usage,
+                Column.at("UPDATED_AT", "b.UPDATED_AT"));
+    }
 
     private TableExtracts() {
     }

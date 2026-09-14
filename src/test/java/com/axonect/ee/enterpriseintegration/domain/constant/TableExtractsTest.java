@@ -54,6 +54,62 @@ class TableExtractsTest {
     }
 
     @Test
+    void theCdrVariantOfTheBucketExtractCarriesExactlyTheSameHeader() {
+        // Where USAGE is read from is a deployment's business; the header is the consuming
+        // system's, and the two variants are registered under the same report type.
+        assertEquals(BUCKET_INSTANCE_HEADER, headerOf(TableExtracts.BUCKET_INSTANCE_FROM_CDR));
+        assertEquals(TableExtracts.BUCKET_INSTANCE_TYPE,
+                TableExtracts.BUCKET_INSTANCE_FROM_CDR.reportType());
+    }
+
+    @Test
+    void theCdrVariantSplicesUsageInInsteadOfSelectingTheTablesCounter() {
+        assertFalse(columnOf(TableExtracts.BUCKET_INSTANCE_FROM_CDR, "USAGE").selected(),
+                "the CDR total is not a column of BUCKET_INSTANCE, so the statement selects "
+                        + "nothing in its place");
+        assertEquals("b.USAGE", sourceOf(TableExtracts.BUCKET_INSTANCE, "USAGE"),
+                "the fallback variant still reports the table's own counter");
+    }
+
+    @Test
+    void theCdrVariantJoinsTheUsernameItsFiguresAreKeyedOnAndIsOrderedByIt() {
+        Spec spec = TableExtracts.BUCKET_INSTANCE_FROM_CDR;
+
+        assertTrue(spec.from().contains("LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID"),
+                "a bucket whose service no longer resolves is still a row of the table");
+        assertEquals(List.of("USER_NAME"), spec.helpers().stream().map(Column::label).toList());
+        assertEquals("si.USERNAME", spec.helpers().get(0).source());
+        assertEquals("si.USERNAME NULLS LAST", spec.orderBy(),
+                "the aggregation is handed out in username order, so the rows are merge-joined "
+                        + "against it in that order — with the unresolved services past the end");
+        assertFalse(labelsOf(spec).contains("USER_NAME"),
+                "the username is read from the row and never written to the file");
+    }
+
+    @Test
+    void theColumnsTheCdrLookupReadsAreFoundByLabelRatherThanCountedByHand() {
+        // A spliced column shifts every result set column after it, so these are derived from the
+        // spec. BucketUsageColumnSource asks for exactly these four.
+        Spec spec = TableExtracts.BUCKET_INSTANCE_FROM_CDR;
+
+        assertEquals(16, spec.csvIndex(TableExtracts.USAGE_COLUMN));
+        assertEquals(13, spec.csvIndex(TableExtracts.SERVICE_ID_COLUMN));
+        assertEquals(1, spec.csvIndex(TableExtracts.BUCKET_ID_COLUMN));
+        assertEquals(18, spec.resultIndex(TableExtracts.USER_NAME_HELPER),
+                "17 selected columns, then the helper: one fewer than the 18 the CSV carries");
+        assertEquals(17, spec.resultIndex("UPDATED_AT"),
+                "the column after USAGE is one place to the left of its CSV position");
+    }
+
+    @Test
+    void theTableSourcedBucketExtractStaysTheSinglePlainScanItWas() {
+        assertFalse(TableExtracts.BUCKET_INSTANCE.ordered(),
+                "without the CDR lookup there is nothing to read the table in step with");
+        assertEquals(List.of(), TableExtracts.BUCKET_INSTANCE.helpers());
+        assertEquals("BUCKET_INSTANCE b", TableExtracts.BUCKET_INSTANCE.from());
+    }
+
+    @Test
     void serviceIdIsTheKeyTheBucketExtractPointsAt() {
         assertEquals("si.ID", sourceOf(TableExtracts.MAC_SERVICE_TABLE, "SERVICE_ID"));
         assertEquals("b.SERVICE_ID", sourceOf(TableExtracts.BUCKET_INSTANCE, "SERVICE_ID"));
@@ -102,6 +158,13 @@ class TableExtractsTest {
 
     private static List<String> timestampLabelsOf(Spec spec) {
         return spec.columns().stream().filter(Column::timestamp).map(Column::label).toList();
+    }
+
+    private static Column columnOf(Spec spec, String label) {
+        return spec.columns().stream()
+                .filter(column -> column.label().equals(label))
+                .findFirst()
+                .orElseThrow();
     }
 
     private static String sourceOf(Spec spec, String label) {

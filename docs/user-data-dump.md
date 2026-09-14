@@ -138,6 +138,12 @@ A shard reporting 0 there is a deployment whose CDRs do not key usage the way th
 that day's sessions were anchored to. It is read inside a filter on the reported day's own index,
 so widening the usage around it left it exactly where it was.
 
+The same figure, asked for by the same pair, is what the `BUCKET_INSTANCE` extract reports as
+`USAGE` — one row per bucket instance rather than one per user, so it asks for every bucket rather
+than only the one behind `QUOTA`. It reads this section's settings rather than carrying its own, so
+there is one definition of what the number is; see `docs/table-extracts.md`. Its rows do not need
+the NAS address, so that sub-aggregation is left out of its request.
+
 ## Reading an empty or zero `UTLIZED_QUOTA`
 
 The two look alike in a spreadsheet and mean different things, and neither can be told from the
@@ -326,7 +332,10 @@ report:
 ```
 
 `usage.enabled: false` leaves both Elasticsearch-filled columns — `UTLIZED_QUOTA` and
-`NAS_IP_ADDRESS` — empty rather than failing the run.
+`NAS_IP_ADDRESS` — empty rather than failing the run. It also takes the CDR figure away from the
+`BUCKET_INSTANCE` extract, which reports the table's own `USAGE` column instead of an empty one;
+the same goes for `usage.nested: false`, since a figure that cannot be attributed to a bucket is
+not a bucket's usage.
 
 `usage.lookback-days` and `usage.scope-to-service` are the two knobs behind the total — see
 **What `UTLIZED_QUOTA` is the total of** above. A positive `lookback-days` names that many daily

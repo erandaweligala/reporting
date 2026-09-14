@@ -9,7 +9,7 @@ run of that size is kept off the critical path of the rest of the service.
 | --- | --- | --- |
 | `MAC_SERVICE_TABLE` | `SERVICE_INSTANCE`, left-joined to `AAA_USER` for `GROUP_ID` | one per service, ~3 M |
 | `PLAN_TO_BUCKET` | `PLAN_TO_BUCKET` | one per plan per bucket, thousands |
-| `BUCKET_INSTANCE` | `BUCKET_INSTANCE` | one per bucket per service, > 3 M |
+| `BUCKET_INSTANCE` | `BUCKET_INSTANCE`, with `USAGE` read from the CDR documents in Elasticsearch | one per bucket per service, > 3 M |
 
 `SERVICE_ID` in the first is `SERVICE_INSTANCE.ID`, which is what `BUCKET_INSTANCE.SERVICE_ID`
 points at — so the three files join back together in the consuming system the way the tables do
@@ -33,6 +33,9 @@ differ from it in ways that must be preserved, so every header line is asserted 
   which both columns could produce.
 - **`BUCKET_INSTANCE`** reports `USAGE` *before* `UPDATED_AT`, where the DDL orders them the other
   way, and omits `IS_UNLIMITED` entirely even though the table carries it.
+- **`BUCKET_INSTANCE.USAGE`** is not the table's `USAGE` column. It is the total the CDR session
+  documents record against that bucket — the figure the user data dump reports as `UTLIZED_QUOTA`,
+  for the bucket each row is. See [What `USAGE` is](#what-bucket_instanceusage-is) below.
 
 Every date and timestamp column is reported as `yyyy-MM-dd HH:mm:ss`, and is displayed that way by
 the spreadsheet an extract is checked in — see [Dates](#dates) below for both halves of that. The
@@ -44,6 +47,108 @@ Each column is still CAST to `TIMESTAMP` before `TO_CHAR` sees it, even though t
 longer carries an `FF` element: `TO_CHAR` of a `DATE` with `FF` raises ORA-01821, so the cast is
 what keeps the statement independent both of which of the two a given column is and of whether a
 deployment's `date-format` asks for a fraction.
+
+## What `BUCKET_INSTANCE.USAGE` is
+
+Everything the CDRs say has been drawn from that bucket instance — the same figure, read the same
+way from the same documents, that the user data dump reports as `UTLIZED_QUOTA`. The table's own
+`USAGE` column is what AAA has managed to write back against the bucket; the CDR deltas are the
+record it is written from, and reporting them is what lets the consuming system reconcile the two.
+
+cdr-service keeps no running total. Each accounting event carries a cumulative `totalUsage`, and
+what the session document stores is the *difference* from the event before it, tagged with the
+`bucketId` it was drawn from and the `serviceId` of the bundle it was charged to. So a total is
+something this extract sums, over every daily index the cluster still holds — `radius-sessions-*`,
+today's among them, because a bucket taken out this morning has drawn all it has drawn from the
+index cdr-service is writing into. `usage.lookback-days` bounds that scan for a cluster that keeps
+years of indices.
+
+Each row asks for its own bucket's share by the pair it already carries: `BUCKET_ID` and
+`SERVICE_ID`. Both are needed. A bucket id names the *plan's* bucket rather than one instance of
+it — a subscriber on a recurring plan draws on the same id cycle after cycle — so a total keyed on
+it alone would report a year of renewals against every one of that subscriber's rows.
+`usage.scope-to-service` is what splits it by the `serviceId` on each session instance, which is
+what `BUCKET_INSTANCE.SERVICE_ID` points at.
+
+**How the two sides meet.** cdr-service groups its documents by `userName`, so a bucket's usage is
+reached through the subscriber holding its service rather than by the bucket's own id — which is
+the one thing that makes this extract's run differ from the other two:
+
+```
+   Oracle ─── BUCKET_INSTANCE ⟕ SERVICE_INSTANCE, ORDER BY si.USERNAME
+                    │
+                    ├── merge-joined in step, one user's figures at a time
+                    │
+   ES     ─── composite aggregation over radius-sessions-*, by userName
+                    │
+                    ▼
+            StreamingCsvWriter ──── 1 MB buffer ──── extract.csv
+```
+
+Both sides are read in username order and consumed in step, so nothing is held but the row being
+written and the aggregation page being drained: heap use is flat at three million rows or thirty,
+and the two scans overlap. The alternatives are what that buys. A lookup per row would be millions
+of Elasticsearch round trips; a map of every bucket's usage, built up front, would cost a full
+aggregation scan and hundreds of megabytes before the first row could be written. The orderings
+have to agree for the merge to work, so the extract's session forces `NLS_SORT=BINARY` and
+`Utf8Order` gives Java the same ordering — the same arrangement the dump uses, for the same reason.
+
+The costs, which the other two extracts do not pay: a join to `SERVICE_INSTANCE`, an `ORDER BY`
+that is a sort of a few million rows in temp space unless the optimizer can walk
+`SERVICE_INSTANCE(USERNAME)` and nested-loop into `BUCKET_INSTANCE(SERVICE_ID)`, and one
+Elasticsearch aggregation over the whole username keyspace. The join is a LEFT join and the
+ordering puts its misses last: a bucket whose `SERVICE_ID` resolves to no service instance is still
+a row of the table and still a row of the extract, with an empty `USAGE`.
+
+### Reading an empty `USAGE` against a 0
+
+The two look alike in a spreadsheet and mean different things — the same distinction the dump
+documents for `UTLIZED_QUOTA`, because it is the same lookup:
+
+**Empty** is a row nothing was found for: a subscriber with no session document anywhere in the
+scan, or a row that carries nothing to look one up by — a `SERVICE_ID` that resolves to no service
+instance, or no `BUCKET_ID`.
+
+**0** is a subscriber who *was* found, holding a bucket none of their session instances name. One
+such row is a bucket nothing has been drawn from — a bandwidth bucket, which no CDR keys usage on,
+is reported as 0 for exactly that reason. A whole file of them is the tell that the id the CDR keys
+usage on is not `BUCKET_INSTANCE.BUCKET_ID`.
+
+Neither can be told from the other in the file, so the run counts both and says so when it ends:
+
+```
+BUCKET_INSTANCE took USAGE from the CDR session documents for 3182044 row(s): 118 found no CDR
+usage at all, whose USAGE is empty, 902 hold a bucket their CDRs never name, whose USAGE is 0, and
+3 carry nothing to look up — a service that no longer resolves, or no bucket id — and are empty as
+well
+BUCKET_INSTANCE took USAGE from the row's own bundle for 3181021 of 3181024 row(s) with both a
+bucket and CDR usage, and from the bucket's total across bundles for the rest
+```
+
+A run reporting the second line's fallback for most of its rows is a deployment whose CDRs do not
+carry `SERVICE_INSTANCE.ID` in `serviceId`; `scope-to-service: false` is the honest setting until
+they do, and it reports the bucket's total across bundles for every row rather than for some.
+
+Two caps bound what one subscriber can be asked for: `usage.buckets-per-user` (20) and
+`usage.services-per-user` (10). A subscriber whose CDRs name more buckets than that has the rest
+reported as 0, so a deployment keeping many cycles of buckets per subscriber should raise them
+rather than read the zeroes as quiet buckets.
+
+### When the column falls back to the table
+
+`usage-from-cdr: false` reports `BUCKET_INSTANCE.USAGE` as the table holds it, and the extract is
+then the single unordered scan the other two are — no join, no `ORDER BY`, no Elasticsearch. A run
+falls back to that by itself in two cases, because in both the CDR figure would be quietly wrong
+rather than absent:
+
+- `report.user-dump.usage.enabled: false`, which would leave the column empty for every row.
+- `report.user-dump.usage.nested: false`. Elasticsearch flattens a `sessionInstances` array that is
+  not mapped as nested, so usage cannot be attributed to one bucket at all; the only figure
+  available is the subscriber's whole usage, and writing that against each of their buckets would
+  read as a total several times over. Fixing the mapping is what gets the column back.
+
+Which of the two figures a deployment reports is in the startup log and nowhere in the file, so it
+is a deployment-wide setting rather than something a request can ask for.
 
 ## How a run is shaped
 
@@ -65,12 +170,21 @@ consuming system loads the file into a table, where row order means nothing, whi
 over a few million rows would either sort in temp space or walk the primary key index and pick rows
 up a block at a time — random I/O where the scan was sequential.
 
+The one extract that does carry an ordering is `BUCKET_INSTANCE` reading its `USAGE` from the CDR
+documents, and it carries one for the only reason that pays for itself: something outside the
+database is being read in step with the scan, and an ordering is what keeps that read from
+buffering either side. That variant is a spec of its own (`TableExtracts.BUCKET_INSTANCE_FROM_CDR`)
+rather than a flag on this one, so the plain extract stays plain — see
+[What `BUCKET_INSTANCE.USAGE` is](#what-bucket_instanceusage-is).
+
 **No sharding, deliberately.** The user data dump splits its keyspace into ranges scanned in
-parallel; these extracts do not, and the difference is not an oversight. There, each shard also had
-an Elasticsearch aggregation to overlap with and a four-way join to plan, so a shard did more than
-re-read the same table. Here there is nothing to overlap: N shards over one flat table are N scans
-of it, and the database does the same work N times to finish no sooner. One sequential scan is both
-the fastest plan Oracle has for this and the lightest thing to ask of a live database.
+parallel; these extracts do not, and the difference is not an oversight. There, each shard is also
+a slice of the dump's four-way join and of its own Elasticsearch aggregation, and shard 0 writes
+into the output file while the rest write parts that are concatenated at the end. Here the scan is
+one flat table and one output file: N shards over it are N scans, and the database does the same
+work N times to finish no sooner. The bucket extract's aggregation does not change that either — it
+is read in step with the scan rather than raced against it, so sharding it would buy a second scan
+of the table to overlap a second aggregation with, not a faster run.
 
 **Bounded memory, whatever the row count.** Nothing is accumulated: one reusable row buffer, one
 buffered writer, and a row that never outlives the callback that writes it. A ten thousand row
@@ -89,7 +203,9 @@ for by name — see below.
 
 **A bounded footprint on everything else.** An extract runs on the report executor like any other
 report, so at most `report.max-concurrent` reports are in flight and the rest queue as `Pending`.
-While it runs it holds one Hikari connection and one cursor — no shard pool, no second data source.
+While it runs it holds one Hikari connection and one cursor — no shard pool, no second data source —
+and, for the bucket extract's usage column, one Elasticsearch aggregation paged through `after_key`
+with no scroll context left open on the cluster. Nothing is ever written to Elasticsearch.
 `query-timeout-seconds` bounds a scan that has gone wrong rather than letting it hold that
 connection indefinitely.
 
@@ -165,11 +281,35 @@ report:
     csv-buffer-bytes: 1048576    # 1 MB in front of the output file
     date-format: "YYYY-MM-DD HH24:MI:SS"  # Oracle model behind every date column
     excel-safe-timestamps: true  # write them as ="..." so Excel displays them
+    usage-from-cdr: true         # BUCKET_INSTANCE.USAGE is the CDR total, not the table's column
 ```
 
-The settings are shared by all three extracts: they differ only in what they select, and the
-defaults that suit the largest are harmless for the smallest — a buffer is allocated per running
-extract, not per row.
+The settings are shared by all three extracts — except the last, which is one extract's one column:
+they differ only in what they select, and the defaults that suit the largest are harmless for the
+smallest, since a buffer is allocated per running extract and not per row.
+
+`usage-from-cdr` decides where `BUCKET_INSTANCE.USAGE` is read from and so what it means; the
+figure itself is configured once, with the dump's, under `report.user-dump.usage`:
+
+```yaml
+report:
+  user-dump:
+    timezone: "${TZ:UTC}"        # the zone the CDR daily indices are named in
+    usage:
+      enabled: true              # off leaves the extract reporting the table's own counter
+      index: radius-sessions     # cdr-service `sessions-data`
+      page-size: 2000            # usernames per aggregation page
+      lookback-days: 0           # 0 = every daily index the cluster holds; else N days ending today
+      buckets-per-user: 20       # distinct buckets counted for one subscriber
+      scope-to-service: true     # each row reports its own bundle's share of the bucket
+      services-per-user: 10      # bundles weighed against one of a subscriber's buckets
+      nested: true               # off leaves the extract reporting the table's own counter
+      instances-path: sessionInstances
+```
+
+Two reports read that figure and there is one definition of it, so a change here moves
+`UTLIZED_QUOTA` and `BUCKET_INSTANCE.USAGE` together — which is the point: they are the same number
+asked for by different rows. `docs/user-data-dump.md` documents each setting in full.
 
 ## Operating notes
 
@@ -184,6 +324,17 @@ extract, not per row.
   `BUCKET_INSTANCE.SERVICE_ID`, and each is a separate run against a separate snapshot — a service
   created between two runs appears in one file and not the other. Running them close together
   narrows that window; it does not close it.
-- **Indexes.** None are needed. Every extract is read end to end, so the cheapest plan is a full
-  scan and no index would improve it. The one join, `SERVICE_INSTANCE` to `AAA_USER` on
-  `USER_NAME`, is a hash join over two scans rather than a lookup per row.
+- **Elasticsearch is on the path of one extract.** A cluster that cannot be reached fails the
+  `BUCKET_INSTANCE` run rather than emptying its `USAGE` column — the same choice the dump makes
+  for `UTLIZED_QUOTA`, and for the same reason: a file of empty usage reads as a subscriber base
+  that has drawn nothing. `usage-from-cdr: false` is what takes the dependency away.
+- **Indexes.** None are needed for `MAC_SERVICE_TABLE` or `PLAN_TO_BUCKET`: each is read end to
+  end, so the cheapest plan is a full scan and no index would improve it, and the one join,
+  `SERVICE_INSTANCE` to `AAA_USER` on `USER_NAME`, is a hash join over two scans rather than a
+  lookup per row. The bucket extract reading CDR usage is the exception —
+  `SERVICE_INSTANCE(USERNAME)` and `BUCKET_INSTANCE(SERVICE_ID)` are what can give Oracle an
+  ordered plan for it instead of a sort of every bucket instance in temp space. Both already exist
+  for the user data dump.
+- **Temp space, for that extract only.** If the optimizer does choose the sort, it sorts a few
+  million rows; a `TEMP` tablespace sized for the rest of this service's work is not automatically
+  sized for that. `usage-from-cdr: false` is the setting that takes the ordering away again.

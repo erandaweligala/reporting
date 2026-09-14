@@ -201,6 +201,16 @@ report:
     # as written. Set false for a consumer that loads an extract with something other than a
     # spreadsheet and wants the database's own text.
     excel-safe-timestamps: true
+    # BUCKET_INSTANCE.USAGE: the total the CDR session documents record against each bucket — the
+    # figure USER_DATA_DUMP reports as UTLIZED_QUOTA — rather than the table's own USAGE column.
+    # The lookup itself is configured once, under report.user-dump.usage below: same indices, same
+    # bundle scope, one definition of what the figure is. Reading it costs this extract a join to
+    # SERVICE_INSTANCE for the username the CDRs are keyed on, an ORDER BY on it, and one
+    # Elasticsearch aggregation walked in step with the scan. Set false to report the column as
+    # the table holds it; a run falls back to that by itself when report.user-dump.usage.enabled
+    # is off or sessionInstances is not mapped as nested, and the startup log says which of the
+    # two figures a deployment is reporting.
+    usage-from-cdr: true
 
   # USER_DATA_DUMP: the full subscriber base (~3M rows) for the previous day, as CSV.
   user-dump:

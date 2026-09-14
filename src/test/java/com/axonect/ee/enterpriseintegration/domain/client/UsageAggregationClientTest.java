@@ -13,6 +13,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -111,6 +112,33 @@ class UsageAggregationClientTest {
                         + "reported against the current cycle's QUOTA");
         assertEquals(0, properties.getUsage().getLookbackDays(),
                 "0 is every index the cluster holds, which is what a running total means");
+    }
+
+    @Test
+    void theBucketExtractReadsTheSameTotalsWithoutTheNasAggregationBesideThem() {
+        // BUCKET_INSTANCE.USAGE is the figure UTLIZED_QUOTA is, summed over the same indices. What
+        // it does not have is a reported day — so the filter and the terms aggregation that read
+        // NAS_IP_ADDRESS for the dump are left out of the request rather than run per user and
+        // dropped on the floor.
+        when(clientProvider.getIfAvailable()).thenReturn(mock(ElasticsearchClient.class));
+
+        assertNotNull(client.openBucketTotals(null, null));
+        assertEquals(List.of("radius-sessions-*"), client.indicesThroughToday(),
+                "the same scan as the dump's: every daily index the cluster holds");
+    }
+
+    @Test
+    void turningTheLookupOffLeavesTheBucketExtractsUsageEmptyRatherThanFailing() {
+        properties.getUsage().setEnabled(false);
+
+        assertNull(client.openBucketTotals(null, null).forUser("taiwowilliams"));
+    }
+
+    @Test
+    void theBucketTotalsCursorAlsoFailsLoudlyWhenNoClusterIsWired() {
+        when(clientProvider.getIfAvailable()).thenReturn(null);
+
+        assertThrows(ReportClientException.class, () -> client.openBucketTotals(null, null));
     }
 
     @Test

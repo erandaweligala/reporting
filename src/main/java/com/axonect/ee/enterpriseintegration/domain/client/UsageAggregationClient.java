@@ -130,16 +130,44 @@ public class UsageAggregationClient {
     /**
      * Opens a cursor over the session documents of every day up to today, restricted to a shard's
      * username range. The bucket totals it hands out cover all of them; the NAS address beside
-     * them covers {@code day} alone.
+     * them covers {@code day} alone. A caller with no NAS column to fill opens
+     * {@link #openBucketTotals} instead.
      *
      * @param day            the day being reported on
      * @param usernameFrom   inclusive lower bound of the shard's username range, null for open
      * @param usernameTo     exclusive upper bound of the shard's username range, null for open
      */
     public UserUsageCursor open(LocalDate day, String usernameFrom, String usernameTo) {
+        return openCursor(indexFor(day), usernameFrom, usernameTo);
+    }
+
+    /**
+     * Opens a cursor over the bucket totals alone: the same figures, summed over the same indices,
+     * with no NAS address beside them and so no reported day to filter one on.
+     *
+     * <p>This is what the BUCKET_INSTANCE extract reads. It reports one row per bucket rather than
+     * one row per user, so the total each row wants is exactly the one UTLIZED_QUOTA is — asked
+     * for by the same pair, the bucket's id and the service instance holding it — while the NAS
+     * address the dump reads in the same pass belongs to a day the extract does not have and to a
+     * column it does not carry. Leaving that sub-aggregation out of the request is a filter and a
+     * terms aggregation the cluster does not run, per user, across the whole username keyspace.
+     *
+     * @param usernameFrom inclusive lower bound of the username range, null for open
+     * @param usernameTo   exclusive upper bound of the username range, null for open
+     */
+    public UserUsageCursor openBucketTotals(String usernameFrom, String usernameTo) {
+        return openCursor(null, usernameFrom, usernameTo);
+    }
+
+    /**
+     * @param reportedDayIndex index the NAS address is read from, or null to leave that column —
+     *                         and the aggregation behind it — out of the request altogether
+     */
+    private UserUsageCursor openCursor(String reportedDayIndex, String usernameFrom, String usernameTo) {
         UserDumpProperties.Usage usage = properties.getUsage();
         if (!usage.isEnabled()) {
-            log.info("Elasticsearch lookup disabled — UTLIZED_QUOTA and NAS_IP_ADDRESS will be left empty");
+            log.info("Elasticsearch lookup disabled — the columns filled from the CDR session "
+                    + "documents will be left empty");
             return UserUsageCursor.empty();
         }
 
@@ -148,7 +176,7 @@ public class UsageAggregationClient {
             throw new ReportClientException("Elasticsearch client is not configured for the usage lookup", null);
         }
         return new CompositeUsageCursor(
-                client, indicesThroughToday(), indexFor(day), usernameFrom, usernameTo, usage);
+                client, indicesThroughToday(), reportedDayIndex, usernameFrom, usernameTo, usage);
     }
 
     /**
@@ -256,13 +284,20 @@ public class UsageAggregationClient {
             String instancesPath = config.getInstancesPath();
             String usageField = instancesPath + ".usage";
 
+            Map<String, Aggregation> aggregations = new HashMap<>(4);
+            // Null means no column is being filled from it, which is the bucket extract: it has no
+            // reported day and no NAS column, so the filter and the terms aggregation under it are
+            // left out of the request rather than run per user and dropped.
+            if (reportedDayIndex != null) {
+                aggregations.put(AGG_REPORTED_DAY, reportedDay());
+            }
+
             if (!config.isNested()) {
                 // Without a nested mapping Elasticsearch flattens the instance array, so a
                 // per-bucket sum would credit every bucket with the whole session's usage. Sum
                 // everything the user drew instead and report it as unattributed.
-                return Map.of(
-                        AGG_USAGE, Aggregation.of(a -> a.sum(s -> s.field(usageField))),
-                        AGG_REPORTED_DAY, reportedDay());
+                aggregations.put(AGG_USAGE, Aggregation.of(a -> a.sum(s -> s.field(usageField))));
+                return aggregations;
             }
 
             Aggregation byBucket = new Aggregation.Builder()
@@ -275,7 +310,8 @@ public class UsageAggregationClient {
                     .aggregations(AGG_BY_BUCKET, byBucket)
                     .build();
 
-            return Map.of(AGG_INSTANCES, instances, AGG_REPORTED_DAY, reportedDay());
+            aggregations.put(AGG_INSTANCES, instances);
+            return aggregations;
         }
 
         /**
