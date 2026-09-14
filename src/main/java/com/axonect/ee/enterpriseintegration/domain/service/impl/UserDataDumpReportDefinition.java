@@ -2,8 +2,8 @@ package com.axonect.ee.enterpriseintegration.domain.service.impl;
 
 import com.axonect.ee.enterpriseintegration.application.config.UserDumpProperties;
 import com.axonect.ee.enterpriseintegration.application.transport.response.CsvColumn;
-import com.axonect.ee.enterpriseintegration.domain.client.UsageAggregationClient;
-import com.axonect.ee.enterpriseintegration.domain.client.UserUsageCursor;
+import com.axonect.ee.enterpriseintegration.domain.client.NasAddressAggregationClient;
+import com.axonect.ee.enterpriseintegration.domain.client.UserNasAddressCursor;
 import com.axonect.ee.enterpriseintegration.domain.constant.SqlStatement;
 import com.axonect.ee.enterpriseintegration.domain.constant.UserDumpSql;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
@@ -40,21 +40,21 @@ import java.util.concurrent.Executor;
  *
  * <p>NAS_IP_ADDRESS has no AAA_USER column behind it, so the dump statement selects nothing for
  * it and the value is spliced in here from the CDR session documents cdr-service writes to
- * Elasticsearch — out of the same per-user stream that already carries UTLIZED_QUOTA, so it costs
- * no extra round trip. SLMN has no column either, but a stand-in worth binding: the dump
- * statement selects the username in its place.
+ * Elasticsearch. It is the one column of the dump that does not come off the cursor. SLMN has no
+ * column either, but a stand-in worth binding: the dump statement selects the username in its
+ * place.
  *
- * <p>UTLIZED_QUOTA is the total the reported bundle has drawn from its quota bucket, which is what
- * makes it readable next to QUOTA, the bucket's whole allowance. cdr-service keeps no such total:
- * it records a usage delta per accounting event, tagged with the bucket and the service instance
- * it was drawn against, so the total is summed over every CDR index the cluster holds — today's
- * among them — and asked for by the pair the dump statement carries in its last two columns.
+ * <p>UTLIZED_QUOTA is BUCKET_INSTANCE.USAGE for the bundle's quota bucket — read off the same
+ * cursor as the QUOTA beside it, pivoted by the same inline view, and so the same figure the
+ * BUCKET_INSTANCE extract reports for that bucket, digit for digit. The two reports are read
+ * against each other, and a total assembled anywhere else is a second number to reconcile rather
+ * than the one the consumer is looking for. This column was such a total, summed from the usage
+ * deltas cdr-service records on its session documents, until the bucket's own running total became
+ * what it reports.
  *
- * <p>Which of the two Elasticsearch-filled columns a user is missing says why. Both empty is a
- * user the aggregation never returned: no session document anywhere in the scan, under that
- * username. A figure of 0 beside a filled NAS address is the opposite — the user was found, and
- * the bucket the database named is not one their CDRs drew on. The shard log counts both, because
- * neither can be told from the other in the file.
+ * <p>An empty NAS_IP_ADDRESS is a user the aggregation never returned: no session document under
+ * that username in the reported day's index. The shard log counts them, because a whole column of
+ * them is not a quiet subscriber base — it is CDRs that are not keyed on AAA_USER.USER_NAME.
  *
  * <p>The cursor hands out one row per MAC address rather than one row per user: collapsing the
  * addresses in SQL would mean LISTAGG, which is the construct the server rejects (see
@@ -131,13 +131,11 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             "bundle_deactivation_date");
 
     /**
-     * Zero-based positions of the two columns that are not read from the database. AAA_USER
-     * carries neither, so both are filled from the CDR session documents in Elasticsearch: the NAS
-     * the user's sessions were anchored to on the reported day, and the total the bundle has drawn
-     * from its quota bucket.
+     * Zero-based position of the one column that is not read from the database. AAA_USER carries
+     * no NAS address, so it is filled from the CDR session documents in Elasticsearch: the NAS the
+     * user's sessions on the reported day were anchored to.
      */
     private static final int NAS_IP_ADDRESS_POSITION = 30;
-    private static final int UTILIZED_QUOTA_POSITION = 37;
 
     /**
      * Zero-based positions of the two MAC columns. Both come straight from the result set, but one
@@ -150,16 +148,16 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     private static final int ORIGINAL_MAC_ADDRESS_POSITION = 21;
 
     private final StreamingRowReader rowReader;
-    private final UsageAggregationClient usageAggregationClient;
+    private final NasAddressAggregationClient nasAddressAggregationClient;
     private final UserDumpProperties properties;
     private final Executor shardExecutor;
 
     public UserDataDumpReportDefinition(StreamingRowReader rowReader,
-                                        UsageAggregationClient usageAggregationClient,
+                                        NasAddressAggregationClient nasAddressAggregationClient,
                                         UserDumpProperties properties,
                                         @Qualifier("userDumpExecutor") Executor shardExecutor) {
         this.rowReader = rowReader;
-        this.usageAggregationClient = usageAggregationClient;
+        this.nasAddressAggregationClient = nasAddressAggregationClient;
         this.properties = properties;
         this.shardExecutor = shardExecutor;
     }
@@ -249,7 +247,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     }
 
     /**
-     * Dumps one username range. The usage cursor and the JDBC cursor are opened together and
+     * Dumps one username range. The NAS address cursor and the JDBC cursor are opened together and
      * advanced in step, which is the whole point of the ordering both sides agree on.
      */
     private long runShard(UsernameRange range, LocalDate day, Path target) throws Exception {
@@ -264,14 +262,14 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
 
         long start = System.currentTimeMillis();
 
-        try (UserUsageCursor usage = usageAggregationClient.open(day, range.fromInclusive(), range.toExclusive());
+        try (UserNasAddressCursor addresses =
+                     nasAddressAggregationClient.open(day, range.fromInclusive(), range.toExclusive());
              StreamingCsvWriter writer = new StreamingCsvWriter(
                      target, properties.getCsvBufferBytes(), timestampColumns())) {
 
             // One buffer per shard, reused for every user. Each shard runs on its own thread and
             // never shares it.
-            MacCollapsingWriter rows = new MacCollapsingWriter(
-                    usage, writer, properties.getUsage().isScopeToService());
+            MacCollapsingWriter rows = new MacCollapsingWriter(addresses, writer);
 
             rowReader.streamInBinaryOrder(
                     statement,
@@ -283,51 +281,26 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
 
             log.info("Shard [{} .. {}) wrote {} rows in {} ms",
                     range.fromInclusive(), range.toExclusive(), rows.written(), System.currentTimeMillis() - start);
-            logUsageCoverage(range, rows);
-            logQuotaAttribution(range, rows);
+            logNasCoverage(range, rows);
             return rows.written();
         }
     }
 
     /**
-     * Reports how many of the shard's rows got no usage out of Elasticsearch at all, and how many
-     * got a zero only because the bucket the database named is one the CDRs never mention.
+     * Reports how many of the shard's rows the NAS lookup had nothing for.
      *
-     * <p>Neither can be read off the file. An empty UTLIZED_QUOTA and a 0 both look like a
-     * subscriber who has not used their bundle, and the first of them is what a whole run of
-     * missing usage looked like while the scan stopped at the reported day. A shard that reports
-     * most of its users here is not reporting a quiet subscriber base — it is reporting that the
-     * usernames, or the bucket ids, are not the ones the CDR documents are keyed on.
+     * <p>It cannot be read off the file: an empty NAS_IP_ADDRESS is a subscriber who held no
+     * session that day, and a column of them is instead a username the CDR documents are not keyed
+     * on — or a day whose index has been rolled away. A shard that reports most of its users here
+     * is reporting the second thing, and nothing in the dump itself would say so.
      */
-    private void logUsageCoverage(UsernameRange range, MacCollapsingWriter rows) {
-        if (!properties.getUsage().isEnabled() || rows.written() == 0) {
+    private void logNasCoverage(UsernameRange range, MacCollapsingWriter rows) {
+        if (!properties.getNasLookup().isEnabled() || rows.written() == 0) {
             return;
         }
-        log.info("Shard [{} .. {}) found no CDR usage at all for {} of {} user(s) — UTLIZED_QUOTA "
-                        + "and NAS_IP_ADDRESS are empty for those — and found {} more holding a "
-                        + "quota bucket their CDRs never name, whose UTLIZED_QUOTA is 0",
-                range.fromInclusive(), range.toExclusive(),
-                rows.withoutCdrUsage(), rows.written(), rows.withUnknownQuotaBucket());
-    }
-
-    /**
-     * Reports how much of the shard's UTLIZED_QUOTA was the reported bundle's own usage.
-     *
-     * <p>The fallback — a bucket's total across every bundle that drew on it — is a plausible
-     * looking number, so a wrong assumption about the CDR's serviceId cannot be seen in the file.
-     * It can be seen here: a shard that attributed none of its rows is a shard whose session
-     * instances are not keyed by SERVICE_INSTANCE.ID, and {@code scope-to-service: false} is then
-     * the honest setting until they are.
-     */
-    private void logQuotaAttribution(UsernameRange range, MacCollapsingWriter rows) {
-        if (!properties.getUsage().isScopeToService() || rows.withQuotaBucket() == 0) {
-            return;
-        }
-        log.info("Shard [{} .. {}) took UTLIZED_QUOTA from the reported bundle's own usage for {} "
-                        + "of {} user(s) with both a quota bucket and CDR usage, and from the "
-                        + "bucket's total across bundles for the rest",
-                range.fromInclusive(), range.toExclusive(),
-                rows.scopedToBundle(), rows.withQuotaBucket());
+        log.info("Shard [{} .. {}) found no session on the reported day for {} of {} user(s) — "
+                        + "NAS_IP_ADDRESS is empty for those",
+                range.fromInclusive(), range.toExclusive(), rows.withoutSession(), rows.written());
     }
 
     /**
@@ -369,9 +342,8 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
          */
         private static final int MAC_LIST_MAX_BYTES = 4000;
 
-        private final UserUsageCursor usage;
+        private final UserNasAddressCursor addresses;
         private final StreamingCsvWriter writer;
-        private final boolean scopeToService;
         private final String[] row = new String[COLUMNS.size()];
         private final StringBuilder macAddresses = new StringBuilder();
         private final StringBuilder originalMacAddresses = new StringBuilder();
@@ -379,16 +351,11 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         private String userName;
         private int macListBytes;
         private long written;
-        private long withQuotaBucket;
-        private long scopedToBundle;
-        private long withoutCdrUsage;
-        private long withUnknownQuotaBucket;
+        private long withoutSession;
 
-        private MacCollapsingWriter(UserUsageCursor usage, StreamingCsvWriter writer,
-                                    boolean scopeToService) {
-            this.usage = usage;
+        private MacCollapsingWriter(UserNasAddressCursor addresses, StreamingCsvWriter writer) {
+            this.addresses = addresses;
             this.writer = writer;
-            this.scopeToService = scopeToService;
         }
 
         void accept(ResultSet resultSet) throws Exception {
@@ -417,88 +384,39 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             return written;
         }
 
-        /** Users written who have both a quota bucket and CDR usage to report against it. */
-        long withQuotaBucket() {
-            return withQuotaBucket;
-        }
-
-        /** How many of those had that usage found under the bundle the dump reports. */
-        long scopedToBundle() {
-            return scopedToBundle;
-        }
-
-        /** Users the aggregation never returned, whose two spliced columns are therefore empty. */
-        long withoutCdrUsage() {
-            return withoutCdrUsage;
+        /** Users the aggregation never returned, whose NAS_IP_ADDRESS is therefore empty. */
+        long withoutSession() {
+            return withoutSession;
         }
 
         /**
-         * Users the aggregation did return, holding a quota bucket their CDRs name nowhere — so
-         * UTLIZED_QUOTA is 0 because nothing was drawn from that bucket, or because the id the
-         * CDR keys usage on is not the BUCKET_ID the dump statement reads.
-         */
-        long withUnknownQuotaBucket() {
-            return withUnknownQuotaBucket;
-        }
-
-        /**
-         * Lays one result set row out over the CSV columns, splicing the two Elasticsearch-filled
-         * columns into the positions the database has no column for. Everything before
-         * NAS_IP_ADDRESS lands on its own position; everything between it and UTLIZED_QUOTA is one
-         * place to the right of its result set column, which is why the second loop indexes the
-         * row by the column number itself.
+         * Lays one result set row out over the CSV columns, splicing the NAS address into the one
+         * position the database has no column for. Everything before it lands on its own position;
+         * everything after it is one place to the right of its result set column, which is why the
+         * second loop indexes the row by the column number itself.
          */
         private void startUser(ResultSet resultSet, String user) throws Exception {
             for (int column = UserDumpSql.COL_USER_ID; column <= UserDumpSql.COL_VLAN_ID; column++) {
                 row[column - 1] = resultSet.getString(column);
             }
-            for (int column = UserDumpSql.COL_NOTIFICATION_TEMPLATES; column <= UserDumpSql.COL_QUOTA; column++) {
+            for (int column = UserDumpSql.COL_NOTIFICATION_TEMPLATES;
+                 column <= UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE; column++) {
                 row[column] = resultSet.getString(column);
             }
 
-            String quotaBucketId = resultSet.getString(UserDumpSql.COL_QUOTA_BUCKET_ID);
-            // The bucket's id names the plan's bucket, so the service instance holding it is what
-            // says which of the user's bundles the usage should be the total of. Reading the column
-            // at all is what scope-to-service switches off.
-            String serviceId = scopeToService ? resultSet.getString(UserDumpSql.COL_SERVICE_ID) : null;
-            // One probe per user: the cursor hands each username out once, and both spliced columns
-            // come out of that single record. The user's remaining rows differ only in their MAC
-            // address, so probing on the first of them is probing once.
-            UserUsageCursor.UserUsage cdr = usage.forUser(user);
-
-            row[NAS_IP_ADDRESS_POSITION] = cdr == null ? null : cdr.nasIpAddress();
-            row[UTILIZED_QUOTA_POSITION] =
-                    cdr == null ? null : Long.toString(cdr.usageOn(serviceId, quotaBucketId));
-            row[UTILIZED_QUOTA_POSITION + 1] = resultSet.getString(UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE);
-            countAttribution(cdr, serviceId, quotaBucketId);
+            // One probe per user: the cursor hands each username out once. The user's remaining
+            // rows differ only in their MAC address, so probing on the first of them is probing
+            // once.
+            UserNasAddressCursor.UserNasAddress session = addresses.forUser(user);
+            row[NAS_IP_ADDRESS_POSITION] = session == null ? null : session.nasIpAddress();
+            if (session == null) {
+                withoutSession++;
+            }
 
             userName = user;
             macAddresses.setLength(0);
             originalMacAddresses.setLength(0);
             macListBytes = 0;
-        }
-
-        /**
-         * Tallies where the figure just written came from, for the two lines the shard logs at
-         * the end: no CDR record at all, a quota bucket the CDRs never name, and — where there is
-         * both — the reported bundle's own usage rather than the bucket's total across bundles.
-         * Two map probes per user rather than a record per user: this runs three million times.
-         */
-        private void countAttribution(UserUsageCursor.UserUsage cdr, String serviceId, String quotaBucketId) {
-            if (cdr == null) {
-                withoutCdrUsage++;
-                return;
-            }
-            if (quotaBucketId != null && !quotaBucketId.isEmpty() && !cdr.knowsBucket(quotaBucketId)) {
-                withUnknownQuotaBucket++;
-            }
-            if (serviceId == null || quotaBucketId == null || quotaBucketId.isEmpty()) {
-                return;
-            }
-            withQuotaBucket++;
-            if (cdr.attributedTo(serviceId, quotaBucketId)) {
-                scopedToBundle++;
-            }
         }
 
         /**

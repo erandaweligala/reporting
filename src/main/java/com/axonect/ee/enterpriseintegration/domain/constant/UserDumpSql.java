@@ -14,9 +14,10 @@ import java.util.List;
  * <ul>
  *   <li>{@code svc} — the SERVICE_INSTANCE that was active on the reported day, one row per user,
  *       picked with ROW_NUMBER() instead of a correlated sub-select.</li>
- *   <li>{@code bkt} — BUCKET_INSTANCE collapsed to one row per service with the bandwidth and the
- *       quota bucket pivoted into columns by conditional aggregation. It joins {@code svc} so the
- *       optimizer prunes it to the shard's users instead of scanning the whole table.</li>
+ *   <li>{@code bkt} — BUCKET_INSTANCE collapsed to one row per service with the bandwidth bucket,
+ *       and the quota bucket's allowance and its usage, pivoted into columns by conditional
+ *       aggregation. It joins {@code svc} so the optimizer prunes it to the shard's users instead
+ *       of scanning the whole table.</li>
  * </ul>
  *
  * <p>The MAC addresses are the one satellite table that is <em>not</em> folded into an aggregate.
@@ -27,8 +28,8 @@ import java.util.List;
  * rejects — see {@link #build} — so the aggregate is spent where no Oracle version has an opinion
  * about it.
  *
- * <p>Timestamps and numbers are converted to text by Oracle (TO_CHAR) rather than in Java. The
- * reader can then pull every column with {@code getString}, which keeps the row pipeline free of
+ * <p>Timestamps are converted to text by Oracle (TO_CHAR) rather than in Java. The reader can then
+ * pull every column with {@code getString}, which keeps the row pipeline free of
  * Timestamp/BigDecimal allocations — at 3 million rows those allocations, not the I/O, are what
  * drives the collector.
  *
@@ -38,12 +39,17 @@ import java.util.List;
  * a user's notifications are sent from. NAS_IP_ADDRESS has none either, and no stand-in worth
  * binding: it lives on the CDR session documents cdr-service writes to Elasticsearch, so the
  * result set carries nothing in that position and {@code UserDataDumpReportDefinition} splices the
- * value in from the same per-user stream that already produces UTLIZED_QUOTA.
+ * value in as it lays the row out. It is the only column of the dump this statement does not
+ * produce.
  *
- * <p>The statement ends with two columns that are not part of the dump at all — the quota bucket's
- * id and the id of the SERVICE_INSTANCE holding it. Neither is written to the CSV; they are what
- * the Elasticsearch side is asked with, so that UTLIZED_QUOTA is everything this bundle has drawn
- * from this bucket rather than everything every bundle ever drew from a bucket of that name.
+ * <p>UTLIZED_QUOTA is one of the pivoted bucket columns: BUCKET_INSTANCE.USAGE, the running total
+ * the bucket itself carries, taken from the same row QUOTA is. That is what makes the two reports
+ * agree — a user's UTLIZED_QUOTA is the USAGE the BUCKET_INSTANCE extract reports for that bucket,
+ * digit for digit, rather than a figure assembled elsewhere and left to be reconciled with it. It
+ * is selected as the NUMBER it is, not rendered with TO_CHAR, because the extract selects the
+ * column as it stands too: both reports then get whatever text the driver's {@code getString}
+ * makes of the same value, and TO_CHAR's own conventions (a leading zero dropped, for one) cannot
+ * come between them.
  *
  * <p>Each stand-in is aliased to the dump column it fills, so the select list can be read against
  * the CSV header even though the reader indexes the result set by position. Selecting a column
@@ -53,7 +59,7 @@ import java.util.List;
  *
  * <p>The username range predicates are what let the dump be sharded: each shard scans a disjoint
  * slice of the username keyspace and the same slice is pushed into the Elasticsearch aggregation,
- * so both sides of the usage join stay aligned.
+ * so both sides of the NAS address join stay aligned.
  */
 public final class UserDumpSql {
 
@@ -63,17 +69,10 @@ public final class UserDumpSql {
     public static final int COL_VLAN_ID = 30;
     /** First column after that slot (NOTIFICATION_TEMPLATES). */
     public static final int COL_NOTIFICATION_TEMPLATES = 31;
-    /** Last column before the UTLIZED_QUOTA slot Elasticsearch fills (QUOTA). */
-    public static final int COL_QUOTA = 36;
-    /** Last column that maps straight onto a CSV column (BUNDLE_DEACTIVATION_DATE). */
-    public static final int COL_BUNDLE_DEACTIVATION_DATE = 37;
-    /** Helper column: the bucket whose usage becomes UTLIZED_QUOTA. Not written to the CSV. */
-    public static final int COL_QUOTA_BUCKET_ID = 38;
-    /**
-     * Helper column: the SERVICE_INSTANCE that bucket belongs to, which is the bundle UTLIZED_QUOTA
-     * is the usage of. Not written to the CSV.
-     */
-    public static final int COL_SERVICE_ID = 39;
+    /** The quota bucket's own USAGE, which is what UTLIZED_QUOTA reports. */
+    public static final int COL_UTLIZED_QUOTA = 37;
+    /** Last column of the statement (BUNDLE_DEACTIVATION_DATE). */
+    public static final int COL_BUNDLE_DEACTIVATION_DATE = 38;
 
     private UserDumpSql() {
     }
@@ -141,7 +140,11 @@ public final class UserDumpSql {
            // as "no cap" — so it is filtered out here rather than labelled.
            .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? AND NVL(b.IS_UNLIMITED, 0) <> 1")
            .append("                 THEN TO_CHAR(b.INITIAL_BALANCE) END) AS QUOTA,")
-           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS QUOTA_BUCKET_ID")
+           // UTLIZED_QUOTA is the quota bucket's own USAGE — the column the BUCKET_INSTANCE
+           // extract reports, so the two files agree on it without anything having to be
+           // reconciled. It is not filtered by IS_UNLIMITED the way QUOTA is: a bundle with no cap
+           // has still drawn what it has drawn, and that is the figure the extract shows for it.
+           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.USAGE END) AS UTLIZED_QUOTA")
            .append(" FROM BUCKET_INSTANCE b JOIN svc ON svc.ID = b.SERVICE_ID")
            .append(" GROUP BY b.SERVICE_ID")
            .append(")");
@@ -164,13 +167,8 @@ public final class UserDumpSql {
            .append("        u.USER_NAME AS SLMN, u.VLAN_ID, u.TEMPLATE_ID AS NOTIFICATION_TEMPLATES,")
            .append("        ").append(asText("u.ACTIVATION_DATE", fmt, "CUSTOMER_ACTIVATION_DATE")).append(",")
            .append("        ").append(asText("svc.SERVICE_START_DATE", fmt, "BUNDLE_ACTIVATION_DATE")).append(",")
-           .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA,")
-           .append("        ").append(asText("svc.EXPIRY_DATE", fmt, "BUNDLE_DEACTIVATION_DATE")).append(",")
-           // The last two are read by the dump rather than written to it: together they name the
-           // bucket instance whose lifetime usage UTLIZED_QUOTA reports. The bucket id alone
-           // would not — it names the plan's bucket, so a recurring bundle draws on the same one
-           // cycle after cycle and the service id is what separates this cycle from the last.
-           .append("        bkt.QUOTA_BUCKET_ID, svc.ID AS SERVICE_ID")
+           .append("        svc.PLAN_NAME, bkt.PLAN_BANDWIDTH, bkt.QUOTA, bkt.UTLIZED_QUOTA,")
+           .append("        ").append(asText("svc.EXPIRY_DATE", fmt, "BUNDLE_DEACTIVATION_DATE"))
            .append(" FROM AAA_USER u")
            .append(" LEFT JOIN svc ON svc.USERNAME = u.USER_NAME")
            .append(" LEFT JOIN bkt ON bkt.SERVICE_ID = svc.ID")

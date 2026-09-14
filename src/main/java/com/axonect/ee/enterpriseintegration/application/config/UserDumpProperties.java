@@ -86,63 +86,20 @@ public class UserDumpProperties {
     /** BUCKET_INSTANCE.BUCKET_TYPE that carries the data quota. */
     private String quotaBucketType = "DATA";
 
-    /** Per-user lookup against the CDR session documents in Elasticsearch. */
-    private Usage usage = new Usage();
+    /**
+     * Per-user lookup against the CDR session documents in Elasticsearch, which fills the one
+     * column AAA_USER has nothing behind: NAS_IP_ADDRESS.
+     */
+    private NasLookup nasLookup = new NasLookup();
 
     @Data
-    public static class Usage {
+    public static class NasLookup {
 
         /** Base name of the CDR daily indices, matching the cdr-service `sessions-data` setting. */
         private String index = "radius-sessions";
 
         /** Composite aggregation page size: usernames returned per Elasticsearch round trip. */
         private int pageSize = 2000;
-
-        /**
-         * Days of CDR indices the bucket totals are summed over, ending today.
-         *
-         * <p>0, the default, is every daily index the cluster still holds — which is what
-         * UTLIZED_QUOTA means: the whole of what a bundle has drawn from its quota bucket, not the
-         * slice of it that fell on D-1. Today's index is read with the rest. Striking the days
-         * after the reported one out of the wildcard by name is what used to keep a dump off the
-         * index cdr-service is writing into, and what left a subscriber whose sessions all started
-         * after the reported day reported as having drawn nothing at all — not a zero, an empty
-         * column, because a user with no document anywhere in the scan is one the aggregation
-         * never returns.
-         *
-         * <p>A positive value names that many daily indices instead, the last of them today's. It
-         * bounds the scan on a cluster that keeps years of them, and it is the setting to reach
-         * for if a retention policy keeps indices around for longer than a bundle can live — but
-         * each day is one more name in the index expression, so a very long window belongs to the
-         * wildcard rather than to a list of several hundred names.
-         */
-        private int lookbackDays = 0;
-
-        /** Maximum distinct buckets counted for a single user. */
-        private int bucketsPerUser = 20;
-
-        /**
-         * Maximum distinct service instances counted against one of that user's buckets. A
-         * subscriber holds one bundle at a time, so this only has to be wide enough to see past
-         * the cycles behind the current one.
-         */
-        private int servicesPerUser = 10;
-
-        /**
-         * Whether a bucket's total is scoped to the bundle the dump is reporting, by the
-         * {@code serviceId} cdr-service records on each session instance.
-         *
-         * <p>On, because a bucket id names the plan's bucket rather than one instance of it: a
-         * subscriber on a recurring plan draws on the same bucket id every cycle, and without the
-         * scope UTLIZED_QUOTA would report every cycle's usage against the current cycle's QUOTA.
-         *
-         * <p>Off reports the bucket's total across every bundle that drew on it, which is also
-         * what an unscoped total falls back to for a user whose CDRs name no service the dump
-         * recognises. The dump logs how many of a shard's rows took that fallback, so a
-         * {@code serviceId} that is not SERVICE_INSTANCE.ID shows up in the log rather than as a
-         * column of quietly unscoped figures.
-         */
-        private boolean scopeToService = true;
 
         /**
          * Distinct NAS addresses considered for a single user in a day. NAS_IP_ADDRESS reports the
@@ -153,7 +110,7 @@ public class UserDumpProperties {
         private int nasAddressesPerUser = 5;
 
         /**
-         * Field NAS_IP_ADDRESS is aggregated on. The usage join has always assumed
+         * Field NAS_IP_ADDRESS is aggregated on. The join itself has always assumed
          * {@code userName.keyword} and is proven against the live indices; this field is newer, and
          * an aggregation on a field the mapping does not have returns no terms rather than an
          * error — an empty column, not a failed run. Overriding it is the fix if cdr-service's
@@ -161,21 +118,7 @@ public class UserDumpProperties {
          */
         private String nasIpField = "nasIpAddress.keyword";
 
-        /**
-         * Whether sessionInstances is mapped as a nested type. When it is, usage can be summed
-         * per bucket; when it is not, Elasticsearch flattens the array and a per-bucket sum would
-         * silently attribute every instance's usage to every bucket the session touched, so the
-         * user's whole usage is reported against them instead.
-         */
-        private boolean nested = true;
-
-        /** Path of the session instance array inside the CDR session document. */
-        private String instancesPath = "sessionInstances";
-
-        /**
-         * Set false to emit an empty UTLIZED_QUOTA and NAS_IP_ADDRESS instead of querying
-         * Elasticsearch.
-         */
+        /** Set false to emit an empty NAS_IP_ADDRESS instead of querying Elasticsearch. */
         private boolean enabled = true;
     }
 }

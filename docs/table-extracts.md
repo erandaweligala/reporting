@@ -33,6 +33,11 @@ differ from it in ways that must be preserved, so every header line is asserted 
   which both columns could produce.
 - **`BUCKET_INSTANCE`** reports `USAGE` *before* `UPDATED_AT`, where the DDL orders them the other
   way, and omits `IS_UNLIMITED` entirely even though the table carries it.
+- **`BUCKET_INSTANCE.USAGE` is also the user data dump's `UTLIZED_QUOTA`.** That dump pivots this
+  same column out of `BUCKET_INSTANCE` for each subscriber's quota bucket, unrendered, so a row of
+  one file carries the same digits as the matching row of the other. Anything done to this column
+  here — a `TO_CHAR`, a unit conversion, a different source — has to be done there too, and
+  `UserDumpSqlTest` fails the build if the two stop naming the same column.
 
 Every date and timestamp column is reported as `yyyy-MM-dd HH:mm:ss`, and is displayed that way by
 the spreadsheet an extract is checked in — see [Dates](#dates) below for both halves of that. The
@@ -183,7 +188,9 @@ extract, not per row.
 - **The three files are a set.** `MAC_SERVICE_TABLE.SERVICE_ID` joins to
   `BUCKET_INSTANCE.SERVICE_ID`, and each is a separate run against a separate snapshot — a service
   created between two runs appears in one file and not the other. Running them close together
-  narrows that window; it does not close it.
+  narrows that window; it does not close it. The same holds between `BUCKET_INSTANCE` and the user
+  data dump: both report `USAGE` for a bucket, and a delta between the two files is the drawdown
+  that happened between the two runs, not a disagreement about what the column is.
 - **Indexes.** None are needed. Every extract is read end to end, so the cheapest plan is a full
   scan and no index would improve it. The one join, `SERVICE_INSTANCE` to `AAA_USER` on
   `USER_NAME`, is a hash join over two scans rather than a lookup per row.

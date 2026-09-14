@@ -221,32 +221,19 @@ report:
     # Set false for a consumer that reads the dump with something other than a spreadsheet.
     excel-safe-timestamps: true
     bandwidth-bucket-type: BANDWIDTH       # BUCKET_INSTANCE.BUCKET_TYPE holding PLAN_BANDWIDTH
-    quota-bucket-type: DATA                # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA
-    usage:
+    quota-bucket-type: DATA                # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA and UTLIZED_QUOTA
+    # The Elasticsearch lookup behind NAS_IP_ADDRESS, the one dump column AAA_USER has no column
+    # for. It reads the reported day's index and no other: the address is that day's. UTLIZED_QUOTA
+    # was summed here too, from the usage deltas on the same documents and over every index the
+    # cluster held; it is now BUCKET_INSTANCE.USAGE, read by the dump statement itself, so that the
+    # figure matches the one the BUCKET_INSTANCE extract reports for the same bucket. Turning this
+    # off leaves NAS_IP_ADDRESS empty and costs the dump nothing else.
+    nas-lookup:
       enabled: true
       index: radius-sessions     # cdr-service `sessions-data`; the daily indices are derived from it
       page-size: 2000            # usernames per composite aggregation page
-      # Days of CDR indices UTLIZED_QUOTA is summed over, ending today. 0 is every index the
-      # cluster still holds, which is what a total means: the column is read next to QUOTA, the
-      # bucket's whole allowance, so it has to be everything the bundle has drawn from that bucket
-      # rather than the slice of it that fell on D-1. Today's index is read along with the rest —
-      # striking the days after the reported one out of the wildcard, which is what kept a dump
-      # off the index cdr-service writes into, left a bundle taken out this morning with an empty
-      # UTLIZED_QUOTA rather than with its usage. A positive value names that many daily indices
-      # instead, the last of them today's.
-      lookback-days: 0
-      buckets-per-user: 20
-      # The CDR names the service instance each usage delta was drawn against, and a bucket id
-      # names the plan's bucket rather than one instance of it — so without this scope a recurring
-      # subscriber's every past cycle would be reported against the current cycle's QUOTA. Set it
-      # false to report the bucket's total across every bundle that drew on it; the dump logs per
-      # shard how many rows already had to fall back to that.
-      scope-to-service: true
-      services-per-user: 10      # bundles weighed against one of a user's buckets
       nas-addresses-per-user: 5  # distinct NAS addresses weighed before NAS_IP_ADDRESS is picked
       nas-ip-field: nasIpAddress.keyword
-      nested: true               # sessionInstances is mapped as a nested type
-      instances-path: sessionInstances
 
 # Elasticsearch cluster holding the CDR session documents, read by the user data dump.
 elasticsearch:
