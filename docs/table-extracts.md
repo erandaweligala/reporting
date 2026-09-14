@@ -101,8 +101,11 @@ the one thing that makes this extract's run differ from the other two:
             StreamingCsvWriter ──── 1 MB buffer ──── extract.csv
 ```
 
-Both sides are read in username order and consumed in step, so nothing is held but the row being
-written and the aggregation page being drained: heap use is flat at three million rows or thirty,
+The statement orders by the username and then, inside each of them, by `EXPIRATION DESC` and
+`ID DESC` — the merge needs only the username, but a subscriber whose usage carries no per-bucket
+split has one figure and one row to put it on, and this is what makes that row the live cycle's
+bucket. Both sides are read in username order and consumed in step, so nothing is held but the row
+being written and the aggregation page being drained: heap use is flat at three million rows or thirty,
 and the two scans overlap. The alternatives are what that buys. A lookup per row would be millions
 of Elasticsearch round trips; a map of every bucket's usage, built up front, would cost a full
 aggregation scan and hundreds of megabytes before the first row could be written. The orderings
@@ -157,18 +160,50 @@ Two caps bound what one subscriber can be asked for: `usage.buckets-per-user` (2
 reported as 0, so a deployment keeping many cycles of buckets per subscriber should raise them
 rather than read the zeroes as quiet buckets.
 
+### When there is no per-bucket split to read at all
+
+`report.user-dump.usage.nested: false` says `sessionInstances` is not mapped as a nested type.
+Elasticsearch flattens such an array, so nothing can be summed per bucket: the whole of what a
+subscriber drew is the only figure the cluster can give back. That is also the figure the dump
+reports for them as `UTLIZED_QUOTA`, because the same record is what fills it — so this column
+reports it too, and reports it **once**: against the subscriber's quota bucket
+(`report.user-dump.quota-bucket-type`, matched whatever case the rows spell it in), with their
+other buckets reporting `0`.
+
+That is the one place a subscriber's whole usage may stand in for one bucket's, and it is sound
+only because there is no split to contradict it. Where the CDRs *do* attribute usage per bucket,
+nothing changes: every row gets its own figure and a bucket they never name is still a `0`.
+
+Which of the subscriber's rows takes it is the statement's ordering, not chance: a subscriber's
+buckets arrive latest-expiring first, so it is their live cycle's bucket rather than one that ran
+out in March. A subscriber holding no bucket of the quota type at all is the one case where this
+extract reports less than the dump does — the dump reports a subscriber, and a row here is a
+bucket. The run counts those:
+
+```
+BUCKET_INSTANCE found no per-bucket split for the subscribers behind 3182044 row(s) —
+sessionInstances is not mapped as nested, so the whole of what a subscriber drew is all there is.
+It was reported against the 748210 quota bucket(s) it belongs to, the same figure USER_DATA_DUMP
+reports as UTLIZED_QUOTA, and as 0 against their other buckets; 3 subscriber(s) held no DATA
+bucket for it to be reported against at all
+```
+
+This is a degradation, not the intended shape. Mapping `sessionInstances` as nested is what makes
+the column per-bucket again; until then it is exactly as exact as `UTLIZED_QUOTA` beside it, which
+is the property the two files are read for.
+
+Falling back to the table's own `USAGE` column here instead is what this extract used to do, and
+it is what left `USAGE` reading `0` against a `UTLIZED_QUOTA` of `10` for the same subscriber: two
+unrelated figures — what AAA has written back, and what the CDRs record — under column names the
+consuming system reconciles.
+
 ### When the column falls back to the table
 
 `usage-from-cdr: false` reports `BUCKET_INSTANCE.USAGE` as the table holds it, and the extract is
 then the single unordered scan the other two are — no join, no `ORDER BY`, no Elasticsearch. A run
-falls back to that by itself in two cases, because in both the CDR figure would be quietly wrong
-rather than absent:
-
-- `report.user-dump.usage.enabled: false`, which would leave the column empty for every row.
-- `report.user-dump.usage.nested: false`. Elasticsearch flattens a `sessionInstances` array that is
-  not mapped as nested, so usage cannot be attributed to one bucket at all; the only figure
-  available is the subscriber's whole usage, and writing that against each of their buckets would
-  read as a total several times over. Fixing the mapping is what gets the column back.
+falls back to that by itself in one case only, which is the case that leaves the dump with nothing
+to report either: `report.user-dump.usage.enabled: false`, where the column would otherwise be
+empty for every row.
 
 Which of the two figures a deployment reports is in the startup log and nowhere in the file, so it
 is a deployment-wide setting rather than something a request can ask for.

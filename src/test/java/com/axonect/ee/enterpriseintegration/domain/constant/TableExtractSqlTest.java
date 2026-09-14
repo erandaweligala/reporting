@@ -92,7 +92,8 @@ class TableExtractSqlTest {
         assertTrue(sql.contains("si.USERNAME FROM BUCKET_INSTANCE b "
                         + "LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID"),
                 "the username the figures are keyed on is selected after the extract's columns");
-        assertTrue(sql.endsWith(" ORDER BY si.USERNAME NULLS LAST"),
+        assertTrue(sql.endsWith(
+                        " ORDER BY si.USERNAME NULLS LAST, b.EXPIRATION DESC NULLS LAST, b.ID DESC"),
                 "an ordering is what lets the aggregation be merge-joined rather than buffered");
         assertTrue(TableExtractSql.build(TableExtracts.BUCKET_INSTANCE, DATE_FORMAT).sql()
                         .contains("b.USAGE"),

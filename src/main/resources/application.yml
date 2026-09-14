@@ -208,8 +208,11 @@ report:
     # SERVICE_INSTANCE for the username the CDRs are keyed on, an ORDER BY on it, and one
     # Elasticsearch aggregation walked in step with the scan. Set false to report the column as
     # the table holds it; a run falls back to that by itself when report.user-dump.usage.enabled
-    # is off or sessionInstances is not mapped as nested, and the startup log says which of the
-    # two figures a deployment is reporting.
+    # is off — there are then no CDR figures for either report — and the startup log says which of
+    # the two figures a deployment is reporting. A sessionInstances mapping that is not nested no
+    # longer takes the column away: there is then no per-bucket split for either report to read, so
+    # each subscriber's whole CDR total, which is what UTLIZED_QUOTA reports for them, is reported
+    # here against their quota bucket and their other buckets report 0.
     usage-from-cdr: true
 
   # USER_DATA_DUMP: the full subscriber base (~3M rows) for the previous day, as CSV.
@@ -259,7 +262,12 @@ report:
       services-per-user: 10
       nas-addresses-per-user: 5  # distinct NAS addresses weighed before NAS_IP_ADDRESS is picked
       nas-ip-field: nasIpAddress.keyword
-      nested: true               # sessionInstances is mapped as a nested type
+      # sessionInstances is mapped as a nested type. False says it is not, and Elasticsearch then
+      # flattens it: usage cannot be attributed to one bucket at all, so UTLIZED_QUOTA and
+      # BUCKET_INSTANCE.USAGE both report the subscriber's whole CDR total — the extract against
+      # the quota bucket alone. It is a degradation of both columns, not a switch: repairing the
+      # mapping is what makes them per-bucket again.
+      nested: true
       instances-path: sessionInstances
 
 # Elasticsearch cluster holding the CDR session documents, read by the user data dump.

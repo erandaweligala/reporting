@@ -157,6 +157,13 @@ than only the one behind `QUOTA`. It reads this section's settings rather than c
 there is one definition of what the number is; see `docs/table-extracts.md`. Its rows do not need
 the NAS address, so that sub-aggregation is left out of its request.
 
+That includes the fallbacks, which is what lets the two files be read against each other. Where
+`usage.nested` is off there is no split for either report to read, so both report the subscriber's
+whole CDR total: this one as their `UTLIZED_QUOTA`, and the extract against the one bucket of
+theirs that total belongs to — their quota bucket — with their other buckets reporting `0`. The
+extract used to give the column up to `BUCKET_INSTANCE.USAGE`, the counter AAA writes back, which
+is what left the two columns showing unrelated figures for the same subscriber.
+
 ## Reading an empty or zero `UTLIZED_QUOTA`
 
 The two look alike in a spreadsheet and mean different things, and neither can be told from the
