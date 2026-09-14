@@ -64,18 +64,44 @@ class UserDumpSqlTest {
         String sql = build(null, null).sql();
 
         assertEquals(1, UserDumpSql.COL_USER_ID);
-        assertTrue(sql.contains("bkt.QUOTA_BUCKET_ID"),
-                "the quota bucket drives the usage lookup and must be selected");
-        assertEquals(UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE + 1, UserDumpSql.COL_QUOTA_BUCKET_ID,
-                "the helper columns follow the last CSV-mapped column");
-        assertTrue(sql.contains("svc.ID AS SERVICE_ID"),
-                "UTLIZED_QUOTA is the usage of one bundle's bucket, so the lookup needs the "
-                        + "service instance beside the bucket id");
-        assertEquals(UserDumpSql.COL_QUOTA_BUCKET_ID + 1, UserDumpSql.COL_SERVICE_ID,
-                "the second helper column follows the first");
         assertEquals(UserDumpSql.COL_VLAN_ID + 1, UserDumpSql.COL_NOTIFICATION_TEMPLATES,
                 "the statement selects nothing for NAS_IP_ADDRESS, so the columns either side "
                         + "of that CSV position are adjacent in the result set");
+        assertTrue(sql.contains("bkt.QUOTA, bkt.UTLIZED_QUOTA,"),
+                "UTLIZED_QUOTA comes off the cursor beside QUOTA, in its own CSV position");
+        assertEquals(UserDumpSql.COL_UTLIZED_QUOTA + 1, UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE,
+                "the deactivation date follows UTLIZED_QUOTA, as it does in the header");
+        assertTrue(sql.contains("') AS BUNDLE_DEACTIVATION_DATE FROM AAA_USER u"),
+                "the statement stops at the last CSV column: it no longer selects a bucket id or "
+                        + "a service id for a lookup outside it");
+    }
+
+    @Test
+    void takesUtlizedQuotaFromTheQuotaBucketsOwnUsageColumn() {
+        String sql = build(null, null).sql();
+
+        // The figure has to be the one the BUCKET_INSTANCE extract reports for the same bucket,
+        // so it is that column, pivoted out of the same view QUOTA comes from, and left a NUMBER:
+        // both reports then hand the same value to the same getString, and TO_CHAR's own
+        // conventions cannot come between them.
+        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.USAGE END) AS UTLIZED_QUOTA"),
+                "UTLIZED_QUOTA is the quota bucket's USAGE, pivoted like the columns beside it");
+        assertFalse(sql.contains("TO_CHAR(b.USAGE"),
+                "rendering it in SQL is what would let the two reports disagree on the text");
+    }
+
+    @Test
+    void pivotsTheVeryColumnTheBucketInstanceExtractReports() {
+        String usage = TableExtracts.BUCKET_INSTANCE.columns().stream()
+                .filter(column -> "USAGE".equals(column.label()))
+                .findFirst()
+                .orElseThrow()
+                .source();
+
+        assertEquals("b.USAGE", usage, "the extract reports the column as it stands");
+        assertTrue(build(null, null).sql().contains("THEN " + usage + " END) AS UTLIZED_QUOTA"),
+                "the dump must read the same column, so a row of one report can be read against "
+                        + "the matching row of the other");
     }
 
     @Test
@@ -251,6 +277,9 @@ class UserDumpSqlTest {
                 "unlimited buckets must be excluded from the QUOTA pivot");
         assertFalse(sql.contains("IS_UNLIMITED = 1 THEN ?"),
                 "no label may be bound in for an unlimited quota");
+        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.USAGE END)"),
+                "UTLIZED_QUOTA is not filtered the same way: a bundle with no cap has still drawn "
+                        + "what it has drawn, and that is what the BUCKET_INSTANCE extract shows");
     }
 
     @Test

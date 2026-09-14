@@ -2,8 +2,8 @@ package com.axonect.ee.enterpriseintegration.domain.service.impl;
 
 import com.axonect.ee.enterpriseintegration.application.config.UserDumpProperties;
 import com.axonect.ee.enterpriseintegration.application.transport.response.CsvColumn;
-import com.axonect.ee.enterpriseintegration.domain.client.UsageAggregationClient;
-import com.axonect.ee.enterpriseintegration.domain.client.UserUsageCursor;
+import com.axonect.ee.enterpriseintegration.domain.client.NasAddressAggregationClient;
+import com.axonect.ee.enterpriseintegration.domain.client.UserNasAddressCursor;
 import com.axonect.ee.enterpriseintegration.domain.constant.SqlStatement;
 import com.axonect.ee.enterpriseintegration.domain.constant.UserDumpSql;
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReport;
@@ -53,26 +53,23 @@ class UserDataDumpReportDefinitionTest {
                     + "CUSTOMER_ACTIVATION_DATE,BUNDLE_ACTIVATION_DATE,BUNDLE_NAME,PLAN_BANDWIDTH,QUOTA,"
                     + "UTLIZED_QUOTA,BUNDLE_DEACTIVATION_DATE";
 
-    /** The SERVICE_INSTANCE the fixtures' bundle is, and so the bundle UTLIZED_QUOTA is of. */
-    private static final String SERVICE_ID = "SVC-NOW";
-
     @TempDir
     Path tempDir;
 
     private StreamingRowReader rowReader;
-    private UsageAggregationClient usageAggregationClient;
+    private NasAddressAggregationClient nasAddressAggregationClient;
     private UserDumpProperties properties;
     private UserDataDumpReportDefinition definition;
 
     @BeforeEach
     void setUp() {
         rowReader = mock(StreamingRowReader.class);
-        usageAggregationClient = mock(UsageAggregationClient.class);
+        nasAddressAggregationClient = mock(NasAddressAggregationClient.class);
         properties = new UserDumpProperties();
         properties.setShards(1);
         properties.setTimezone("UTC");
         definition = new UserDataDumpReportDefinition(
-                rowReader, usageAggregationClient, properties, Runnable::run);
+                rowReader, nasAddressAggregationClient, properties, Runnable::run);
     }
 
     @Test
@@ -98,11 +95,10 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
-    void writesEachDatabaseColumnIntoItsAgreedPositionAndFillsTheRestFromElasticsearch() throws Exception {
-        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "107374182400", "DATA_1");
+    void writesEachDatabaseColumnIntoItsAgreedPositionAndSplicesTheNasAddressIn() throws Exception {
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "107374182400", "70093948746");
         stubReader(List.<String[]>of(dbRow));
-        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 70093948746L)),
-                Map.of("taiwowilliams", "10.20.30.40"));
+        stubNasAddresses(Map.of("taiwowilliams", "10.20.30.40"));
 
         Path output = outputWithHeader("dump.csv");
         long rows = definition.streamTo(report(), output);
@@ -126,8 +122,8 @@ class UserDataDumpReportDefinitionTest {
                 "NOTIFICATION_TEMPLATES, which the statement fills from TEMPLATE_ID");
         assertEquals("FTTH_50Mbps", written[35], "PLAN_BANDWIDTH");
         assertEquals("107374182400", written[36], "QUOTA");
-        // ...then usage is spliced in too, and the last database column follows it.
-        assertEquals("70093948746", written[37], "UTLIZED_QUOTA");
+        assertEquals("70093948746", written[37],
+                "UTLIZED_QUOTA, the quota bucket's own USAGE, off the same cursor");
         assertEquals("bundle-end", written[38], "BUNDLE_DEACTIVATION_DATE");
     }
 
@@ -139,7 +135,7 @@ class UserDataDumpReportDefinitionTest {
                 macRow("taiwowilliams", "AA:AA", "BB:AA"),
                 macRow("taiwowilliams", "AA:BB", "BB:BB"),
                 macRow("taiwowilliams", "AA:CC", "BB:CC")));
-        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 42L)), Map.of("taiwowilliams", "10.0.0.1"));
+        stubNasAddresses(Map.of("taiwowilliams", "10.0.0.1"));
 
         Path output = outputWithHeader("macs.csv");
         long rows = definition.streamTo(report(), output);
@@ -154,32 +150,32 @@ class UserDataDumpReportDefinitionTest {
         assertEquals("AA:AA,AA:BB,AA:CC", written.get(19), "MAC_ADDRESS");
         assertEquals("BB:AA,BB:BB,BB:CC", written.get(21), "ORIGINAL_MAC_ADDRESS");
         assertEquals("10.0.0.1", written.get(30), "the columns after the lists must not shift");
-        assertEquals("42", written.get(37), "UTLIZED_QUOTA");
+        assertEquals("512", written.get(37), "UTLIZED_QUOTA");
     }
 
     @Test
     void probesElasticsearchOncePerUserRatherThanOncePerMacAddress() throws Exception {
-        // The usage cursor hands each username out exactly once; a second probe for a user it has
-        // already passed would come back empty and blank the two spliced columns.
+        // The cursor hands each username out exactly once; a second probe for a user it has
+        // already passed would come back empty and blank the spliced column.
         stubReader(List.of(
                 macRow("firstuser", "AA:AA", "BB:AA"),
                 macRow("firstuser", "AA:BB", "BB:BB"),
                 macRow("seconduser", "CC:CC", "DD:DD")));
-        stubUsage(Map.of("firstuser", Map.of("DATA_1", 11L), "seconduser", Map.of("DATA_1", 22L)));
+        stubNasAddresses(Map.of("firstuser", "10.0.0.1", "seconduser", "10.0.0.2"));
 
         Path output = outputWithHeader("probes.csv");
         assertEquals(2, definition.streamTo(report(), output));
 
         List<String> lines = Files.readAllLines(output);
-        assertEquals("11", fields(lines.get(1)).get(37));
-        assertEquals("22", fields(lines.get(2)).get(37));
+        assertEquals("10.0.0.1", fields(lines.get(1)).get(30));
+        assertEquals("10.0.0.2", fields(lines.get(2)).get(30));
     }
 
     @Test
     void aUserHoldingNoMacAddressStillGetsARowWithBothColumnsEmpty() throws Exception {
         // The outer join gives such a user a single row with both MAC columns null.
         stubReader(List.<String[]>of(macRow("nomacuser", null, null)));
-        stubUsage(Map.of());
+        stubNasAddresses(Map.of());
 
         Path output = outputWithHeader("no-mac.csv");
         assertEquals(1, definition.streamTo(report(), output));
@@ -203,7 +199,7 @@ class UserDataDumpReportDefinitionTest {
             rows.add(macRow("busyuser", longMac, longOriginal));
         }
         stubReader(rows);
-        stubUsage(Map.of());
+        stubNasAddresses(Map.of());
 
         Path output = outputWithHeader("budget.csv");
         assertEquals(1, definition.streamTo(report(), output));
@@ -249,8 +245,8 @@ class UserDataDumpReportDefinitionTest {
 
     @Test
     void aUserWhoseSessionsNamedNoNasLeavesTheColumnEmptyWithoutShiftingTheRow() throws Exception {
-        stubReader(List.<String[]>of(databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1")));
-        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+        stubReader(List.<String[]>of(databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "5")));
+        stubNasAddresses(sessionWithoutNas("taiwowilliams"));
 
         Path output = outputWithHeader("no-nas.csv");
         definition.streamTo(report(), output);
@@ -259,14 +255,16 @@ class UserDataDumpReportDefinitionTest {
         assertEquals(39, written.length);
         assertEquals("", written[30], "NAS_IP_ADDRESS");
         assertEquals("col31", written[31], "NOTIFICATION_TEMPLATES");
+        assertEquals("5", written[37], "UTLIZED_QUOTA comes off the cursor, not from this lookup");
     }
 
     @Test
     void anUnlimitedBundleReportsAnEmptyQuotaRatherThanALabel() throws Exception {
         // UserDumpSql leaves QUOTA null for an unlimited data bucket; it must reach the CSV as an
-        // empty column, without disturbing the ones around it.
-        stubReader(List.<String[]>of(databaseRow("unlimiteduser", "FTTH_50Mbps", null, "DATA_1")));
-        stubUsage(Map.of("unlimiteduser", Map.of("DATA_1", 70093948746L)));
+        // empty column, without disturbing the ones around it — and the bucket has still recorded
+        // what it has recorded, which is what the BUCKET_INSTANCE extract reports for it too.
+        stubReader(List.<String[]>of(databaseRow("unlimiteduser", "FTTH_50Mbps", null, "70093948746")));
+        stubNasAddresses(Map.of());
 
         Path output = outputWithHeader("unlimited.csv");
         definition.streamTo(report(), output);
@@ -279,83 +277,56 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
-    void reportsWhatTheBundleDrewFromItsBucketRatherThanWhatEveryBundleDrew() throws Exception {
-        // The bucket id names the plan's bucket, so a recurring subscriber draws on the same one
-        // every cycle. 900 of the 1024 belong to a bundle that has since expired, and QUOTA beside
-        // this column is the current bundle's allowance.
-        stubReader(List.<String[]>of(databaseRow("recurringuser", "FTTH_50Mbps", "1024", "DATA_1")));
-        stubUsageSplitAcrossBundles("recurringuser", "DATA_1", Map.of("SVC-OLD", 900L, SERVICE_ID, 124L));
+    void writesTheUsageExactlyAsTheDatabaseProducedIt() throws Exception {
+        // The point of the column: a row of this dump is read against the BUCKET_INSTANCE extract's
+        // row for the same bucket, and both write what getString made of the same NUMBER. Nothing
+        // here may parse, round or reformat it on the way past.
+        stubReader(List.of(
+                databaseRow("bigdrawer", "FTTH_50Mbps", "107374182400", "9223372036854775808"),
+                databaseRow("fractionaldrawer", "FTTH_50Mbps", "1024", "0.5")));
+        stubNasAddresses(Map.of());
 
-        Path output = outputWithHeader("bundle-scoped.csv");
-        definition.streamTo(report(), output);
+        Path output = outputWithHeader("verbatim.csv");
+        assertEquals(2, definition.streamTo(report(), output));
+
+        List<String> lines = Files.readAllLines(output);
+        assertEquals("9223372036854775808", lines.get(1).split(",", -1)[37],
+                "past what a long holds, and still the database's own text");
+        assertEquals("0.5", lines.get(2).split(",", -1)[37], "not rounded to a whole number");
+    }
+
+    @Test
+    void aBundleWithNoQuotaBucketLeavesTheColumnEmptyRatherThanReportingAZero() throws Exception {
+        // The outer join gives such a user a null there, and an empty column says "no bucket to
+        // report" — which is what the BUCKET_INSTANCE extract says about them too, by having no
+        // row for them at all. A 0 would say the bucket exists and has not been drawn on.
+        stubReader(List.<String[]>of(databaseRow("nobundleuser", null, null, null)));
+        stubNasAddresses(Map.of("nobundleuser", "10.20.30.40"));
+
+        Path output = outputWithHeader("no-bucket.csv");
+        assertEquals(1, definition.streamTo(report(), output));
 
         String[] written = Files.readAllLines(output).get(1).split(",", -1);
-        assertEquals("124", written[37], "UTLIZED_QUOTA is this bundle's share of the bucket");
+        assertEquals(39, written.length);
+        assertEquals("", written[36], "QUOTA");
+        assertEquals("", written[37], "UTLIZED_QUOTA");
+        assertEquals("bundle-end", written[38], "the columns after it must not shift");
     }
 
     @Test
-    void fallsBackToTheBucketsWholeTotalWhenNoBundleOfThatNameDrewOnIt() throws Exception {
-        // What a CDR whose serviceId is not SERVICE_INSTANCE.ID degrades to. Reporting zero would
-        // read as a subscriber who has used nothing; the unscoped total is at least a real figure.
-        stubReader(List.<String[]>of(databaseRow("unmatcheduser", "FTTH_50Mbps", "1024", "DATA_1")));
-        stubUsage(Map.of("unmatcheduser", Map.of("DATA_1", 700L)), Map.of(), "SVC-SOMETHING-ELSE");
-
-        Path output = outputWithHeader("unmatched.csv");
-        definition.streamTo(report(), output);
-
-        assertEquals("700", Files.readAllLines(output).get(1).split(",", -1)[37], "UTLIZED_QUOTA");
-    }
-
-    @Test
-    void scopingCanBeSwitchedOffToReportTheBucketAcrossEveryBundle() throws Exception {
-        properties.getUsage().setScopeToService(false);
-        stubReader(List.<String[]>of(databaseRow("recurringuser", "FTTH_50Mbps", "1024", "DATA_1")));
-        stubUsageSplitAcrossBundles("recurringuser", "DATA_1", Map.of("SVC-OLD", 900L, SERVICE_ID, 124L));
-
-        Path output = outputWithHeader("unscoped.csv");
-        definition.streamTo(report(), output);
-
-        assertEquals("1024", Files.readAllLines(output).get(1).split(",", -1)[37],
-                "with the scope off the bucket's total across bundles is what is reported");
-    }
-
-    @Test
-    void usersWithoutSessionsThatDayGetAnEmptyUtilizedQuotaAndNasAddress() throws Exception {
-        stubReader(List.<String[]>of(databaseRow("quietuser", "FTTH_50Mbps", "1024", "DATA_1")));
-        stubUsage(Map.of());
+    void usersWithoutSessionsThatDayGetAnEmptyNasAddressButKeepTheirUsage() throws Exception {
+        // The two columns no longer come from the same place: a subscriber the CDR indices have
+        // never heard of still has a bucket, and the dump still reports what it says.
+        stubReader(List.<String[]>of(databaseRow("quietuser", "FTTH_50Mbps", "1024", "0")));
+        stubNasAddresses(Map.of());
 
         Path output = outputWithHeader("quiet.csv");
         definition.streamTo(report(), output);
 
         String[] written = Files.readAllLines(output).get(1).split(",", -1);
         assertEquals("", written[30], "NAS_IP_ADDRESS");
-        assertEquals("", written[37], "UTLIZED_QUOTA");
+        assertEquals("0", written[37], "UTLIZED_QUOTA");
         assertEquals("bundle-end", written[38], "the columns after them must not shift");
-    }
-
-    @Test
-    void anAbsentUserReportsAnEmptyColumnAndAnUnknownBucketAZero() throws Exception {
-        // The two look alike in the file and are not the same thing, which is why the shard log
-        // counts them separately: a user Elasticsearch never returned — everything they drew is
-        // outside the scan, or their username is not what the CDRs are keyed on — against one it
-        // did return, holding a quota bucket none of their session instances name.
-        stubReader(List.of(
-                databaseRow("absentuser", "FTTH_50Mbps", "1024", "DATA_1"),
-                databaseRow("knownuser", "FTTH_50Mbps", "1024", "DATA_1"),
-                databaseRow("wrongbucketuser", "FTTH_50Mbps", "1024", "DATA_9")));
-        stubUsage(Map.of(
-                "knownuser", Map.of("DATA_1", 500L),
-                "wrongbucketuser", Map.of("DATA_1", 700L)));
-
-        Path output = outputWithHeader("coverage.csv");
-        assertEquals(3, definition.streamTo(report(), output));
-
-        List<String> lines = Files.readAllLines(output);
-        assertEquals("", lines.get(1).split(",", -1)[37],
-                "absentuser is not in the aggregation at all, so the column is empty");
-        assertEquals("500", lines.get(2).split(",", -1)[37], "knownuser's own bucket");
-        assertEquals("0", lines.get(3).split(",", -1)[37],
-                "wrongbucketuser holds a bucket their CDRs never name, which reads as a zero");
     }
 
     @Test
@@ -366,7 +337,7 @@ class UserDataDumpReportDefinitionTest {
         assertEquals("YYYY-MM-DD HH24:MI:SS", new UserDumpProperties().getDateFormat());
 
         stubReader(List.of());
-        stubUsage(Map.of());
+        stubNasAddresses(Map.of());
 
         definition.streamTo(report(), outputWithHeader("format.csv"));
 
@@ -386,14 +357,14 @@ class UserDataDumpReportDefinitionTest {
         // shows the number. Dropping the milliseconds from the format model did not stop it. The
         // ="..." form does — it is a formula whose value is the string — and it is applied to
         // exactly the five columns the statement renders with TO_CHAR, not to the row.
-        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1");
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "5");
         dbRow[9] = "2026-09-06 01:54:19";                                    // CREATED_DATE
         dbRow[27] = "2026-09-06 01:54:19";                                   // UPDATED_DATE
         dbRow[31] = "2026-09-06 01:54:19";                                   // CUSTOMER_ACTIVATION_DATE
         dbRow[32] = "2026-09-10 12:44:38";                                   // BUNDLE_ACTIVATION_DATE
         dbRow[UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE - 1] = "2026-12-09 12:44:38";
         stubReader(List.<String[]>of(dbRow));
-        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+        stubNasAddresses(Map.of("taiwowilliams", "10.20.30.40"));
 
         Path output = outputWithHeader("excel-safe.csv");
         definition.streamTo(report(), output);
@@ -420,10 +391,10 @@ class UserDataDumpReportDefinitionTest {
         // The displayed format is a property of the file, not of the configuration: whatever
         // date-format a deployment turns out to carry, the operator reads yyyy-MM-dd HH:mm:ss.
         properties.setDateFormat("YYYY-MM-DD HH24:MI:SS.FF3");
-        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1");
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "5");
         dbRow[9] = "2026-09-06 01:54:19.123";
         stubReader(List.<String[]>of(dbRow));
-        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+        stubNasAddresses(Map.of("taiwowilliams", "10.20.30.40"));
 
         Path output = outputWithHeader("fractional.csv");
         definition.streamTo(report(), output);
@@ -437,10 +408,10 @@ class UserDataDumpReportDefinitionTest {
         // The ="..." is a spreadsheet formula, and a consumer that loads the dump with something
         // else wants the bare timestamp. Nothing but the five columns changes with the switch.
         properties.setExcelSafeTimestamps(false);
-        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "DATA_1");
+        String[] dbRow = databaseRow("taiwowilliams", "FTTH_50Mbps", "1024", "5");
         dbRow[9] = "2026-09-06 01:54:19";
         stubReader(List.<String[]>of(dbRow));
-        stubUsage(Map.of("taiwowilliams", Map.of("DATA_1", 5L)));
+        stubNasAddresses(Map.of("taiwowilliams", "10.20.30.40"));
 
         Path output = outputWithHeader("plain.csv");
         definition.streamTo(report(), output);
@@ -456,27 +427,27 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
-    void aggregatesUsageForTheDayBeforeTheRun() throws Exception {
+    void looksUpTheNasAddressForTheDayBeforeTheRun() throws Exception {
         stubReader(List.of());
-        stubUsage(Map.of());
+        stubNasAddresses(Map.of());
 
         definition.streamTo(report(), outputWithHeader("day.csv"));
 
         ArgumentCaptor<LocalDate> day = ArgumentCaptor.forClass(LocalDate.class);
-        verify(usageAggregationClient).open(day.capture(), eq(null), eq(null));
+        verify(nasAddressAggregationClient).open(day.capture(), eq(null), eq(null));
         assertEquals(LocalDate.now(ZoneId.of("UTC")).minusDays(1), day.getValue());
     }
 
     @Test
     void shardPartsAreConcatenatedInUsernameOrderRegardlessOfWhichShardFinishesFirst() throws Exception {
         properties.setShards(3);
-        stubUsage(Map.of());
+        stubNasAddresses(Map.of());
 
         // Each shard emits a single row naming the range it was given, so the finished file shows
         // whether the parts were stitched back together in keyspace order.
         when(rowReader.streamInBinaryOrder(any(), anyInt(), anyInt(), any())).thenAnswer(invocation -> {
             StreamingRowReader.RowHandler handler = invocation.getArgument(3);
-            handler.handle(resultSetOf(databaseRow(shardInProgress.get(), "bw", "quota", "DATA_1")));
+            handler.handle(resultSetOf(databaseRow(shardInProgress.get(), "bw", "quota", "512")));
             return 1L;
         });
 
@@ -498,13 +469,13 @@ class UserDataDumpReportDefinitionTest {
     void eachShardAggregatesOnlyItsOwnUsernameRange() throws Exception {
         properties.setShards(3);
         stubReader(List.of());
-        stubUsage(Map.of());
+        stubNasAddresses(Map.of());
 
         definition.streamTo(report(), outputWithHeader("ranges.csv"));
 
         ArgumentCaptor<String> from = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> to = ArgumentCaptor.forClass(String.class);
-        verify(usageAggregationClient, times(3)).open(any(), from.capture(), to.capture());
+        verify(nasAddressAggregationClient, times(3)).open(any(), from.capture(), to.capture());
 
         List<UserDumpShardPlanner.UsernameRange> aggregated = new ArrayList<>();
         for (int i = 0; i < 3; i++) {
@@ -520,7 +491,7 @@ class UserDataDumpReportDefinitionTest {
     @Test
     void aFailingShardLeavesNoPartFilesBehind() throws Exception {
         properties.setShards(3);
-        stubUsage(Map.of());
+        stubNasAddresses(Map.of());
         when(rowReader.streamInBinaryOrder(any(), anyInt(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("ORA-01555: snapshot too old"));
 
@@ -576,74 +547,36 @@ class UserDataDumpReportDefinitionTest {
     }
 
     /**
-     * Serves the Elasticsearch side from a fixed table, in the username order the join expects.
-     * Every bucket total is also recorded against {@link #SERVICE_ID}, the bundle the fixtures'
-     * rows carry, so these users read as having drawn it all on the bundle being reported.
+     * Serves the Elasticsearch side from a fixed table, in the username order the join expects. A
+     * user in it is one the aggregation returned — one who held a session on the reported day —
+     * and the address they are mapped to may be null, which is a session that named no NAS.
      */
-    private void stubUsage(Map<String, Map<String, Long>> usageByUser) {
-        stubUsage(usageByUser, Map.of());
-    }
-
-    private void stubUsage(Map<String, Map<String, Long>> usageByUser, Map<String, String> nasByUser) {
-        stubUsage(usageByUser, nasByUser, SERVICE_ID);
-    }
-
-    /** The same, with the bucket totals recorded against a bundle of the caller's choosing. */
-    private void stubUsage(Map<String, Map<String, Long>> usageByUser, Map<String, String> nasByUser,
-                           String drawnBy) {
-        when(usageAggregationClient.open(any(), any(), any())).thenAnswer(invocation -> {
+    private void stubNasAddresses(Map<String, String> nasByUser) {
+        when(nasAddressAggregationClient.open(any(), any(), any())).thenAnswer(invocation -> {
             String from = invocation.getArgument(1);
             shardInProgress.set(from == null ? OPEN_START : from);
 
-            List<String> users = new ArrayList<>(usageByUser.keySet());
+            List<String> users = new ArrayList<>(nasByUser.keySet());
             users.sort(String::compareTo);
             var iterator = users.iterator();
-            return new UserUsageCursor() {
+            return new UserNasAddressCursor() {
                 @Override
-                protected UserUsage fetchNext() {
+                protected UserNasAddress fetchNext() {
                     if (!iterator.hasNext()) {
                         return null;
                     }
                     String user = iterator.next();
-                    Map<String, Long> buckets = usageByUser.get(user);
-                    long total = buckets.values().stream().mapToLong(Long::longValue).sum();
-                    return new UserUsage(user, buckets, drawnBy(buckets, drawnBy), total, true,
-                            nasByUser.get(user));
+                    return new UserNasAddress(user, nasByUser.get(user));
                 }
             };
         });
     }
 
-    /**
-     * One user whose single bucket was drawn on by more than one bundle: the bucket's total is
-     * the sum, and each bundle's share is recorded beside it the way the aggregation reports it.
-     */
-    private void stubUsageSplitAcrossBundles(String user, String bucketId, Map<String, Long> byService) {
-        long total = byService.values().stream().mapToLong(Long::longValue).sum();
-        Map<String, Long> perServiceBucket = new HashMap<>();
-        byService.forEach((serviceId, usage) -> perServiceBucket.put(
-                UserUsageCursor.UserUsage.serviceBucketKey(serviceId, bucketId), usage));
-
-        when(usageAggregationClient.open(any(), any(), any())).thenAnswer(invocation -> {
-            shardInProgress.set(OPEN_START);
-            var entry = new java.util.concurrent.atomic.AtomicReference<>(
-                    new UserUsageCursor.UserUsage(user, Map.of(bucketId, total), perServiceBucket,
-                            total, true, null));
-            return new UserUsageCursor() {
-                @Override
-                protected UserUsage fetchNext() {
-                    return entry.getAndSet(null);
-                }
-            };
-        });
-    }
-
-    /** The bucket totals keyed the way the aggregation reports a single bundle's share of them. */
-    private static Map<String, Long> drawnBy(Map<String, Long> buckets, String serviceId) {
-        Map<String, Long> perServiceBucket = new HashMap<>();
-        buckets.forEach((bucketId, usage) -> perServiceBucket.put(
-                UserUsageCursor.UserUsage.serviceBucketKey(serviceId, bucketId), usage));
-        return perServiceBucket;
+    /** A one-user table carrying an address {@code Map.of} would refuse: none at all. */
+    private static Map<String, String> sessionWithoutNas(String user) {
+        Map<String, String> addresses = new HashMap<>();
+        addresses.put(user, null);
+        return addresses;
     }
 
     /**
@@ -651,8 +584,8 @@ class UserDataDumpReportDefinitionTest {
      * from Elasticsearch — so the row is one column shorter than the CSV, and the username stands
      * in for SLMN the way the statement binds it.
      */
-    private String[] databaseRow(String userName, String bandwidth, String quota, String quotaBucketId) {
-        String[] values = new String[UserDumpSql.COL_SERVICE_ID];
+    private String[] databaseRow(String userName, String bandwidth, String quota, String utlizedQuota) {
+        String[] values = new String[UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE];
         for (int i = 0; i < values.length; i++) {
             values[i] = "col" + (i + 1);
         }
@@ -660,15 +593,14 @@ class UserDataDumpReportDefinitionTest {
         values[28] = userName;
         values[34] = bandwidth;
         values[35] = quota;
+        values[UserDumpSql.COL_UTLIZED_QUOTA - 1] = utlizedQuota;
         values[UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE - 1] = "bundle-end";
-        values[UserDumpSql.COL_QUOTA_BUCKET_ID - 1] = quotaBucketId;
-        values[UserDumpSql.COL_SERVICE_ID - 1] = SERVICE_ID;
         return values;
     }
 
     /** A row of the fan-out the MAC join produces: one user, one of their MAC addresses. */
     private String[] macRow(String userName, String macAddress, String originalMacAddress) {
-        String[] values = databaseRow(userName, "FTTH_50Mbps", "1024", "DATA_1");
+        String[] values = databaseRow(userName, "FTTH_50Mbps", "1024", "512");
         values[19] = macAddress;
         values[21] = originalMacAddress;
         return values;
