@@ -257,6 +257,18 @@ report:
       nas-ip-field: nasIpAddress.keyword
       nested: true               # sessionInstances is mapped as a nested type
       instances-path: sessionInstances
+      # Which spelling of the three CDR fields the figure is read by. Left unset — the default —
+      # each is resolved against the cluster's own mapping when a cursor is opened: the field
+      # itself where it is a keyword, its .keyword sub-field where it is text. They are not
+      # assumed any more because the assumption failed silently and cost the whole figure: a terms
+      # aggregation on a field the mapping does not have returns no terms rather than an error, so
+      # every bucket looked like one the CDRs never drew on and both UTLIZED_QUOTA and
+      # BUCKET_INSTANCE.USAGE came out as 0 on every row while the documents held the usage. Set
+      # one to pin it by name for a mapping the question cannot settle; the startup log says which
+      # spelling each run resolved to.
+      # username-field: userName.keyword
+      # bucket-id-field: sessionInstances.bucketId.keyword
+      # service-id-field: sessionInstances.serviceId.keyword
 
 # Elasticsearch cluster holding the CDR session documents, read by the user data dump.
 elasticsearch:

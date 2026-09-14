@@ -329,7 +329,20 @@ report:
       nas-ip-field: nasIpAddress.keyword
       nested: true
       instances-path: sessionInstances
+      # username-field:   userName.keyword               # unset: resolved from the mapping
+      # bucket-id-field:  sessionInstances.bucketId.keyword
+      # service-id-field: sessionInstances.serviceId.keyword
 ```
+
+`usage.bucket-id-field`, `usage.service-id-field` and `usage.username-field` are left unset by
+default, and each is then resolved against the cluster's own mapping when a cursor is opened: the
+field itself where it is a keyword, its `.keyword` sub-field where it is text. They are not assumed
+any more because the assumption failed silently and cost the whole figure — a terms aggregation on
+a field the mapping does not have returns no terms rather than an error, so every quota bucket
+looked like one the CDRs never drew on and `UTLIZED_QUOTA` came out as 0 for every user while the
+documents held the usage. The resolved spellings are in the log at the head of each run, and a
+field neither spelling can aggregate on gets a warning naming it. Set one to pin it for a mapping
+the question cannot settle.
 
 `usage.enabled: false` leaves both Elasticsearch-filled columns — `UTLIZED_QUOTA` and
 `NAS_IP_ADDRESS` — empty rather than failing the run. It also takes the CDR figure away from the
@@ -387,6 +400,10 @@ starting point, not a maximum.
   usage join already assumes of `userName`. An aggregation on a field the mapping does not have
   returns no terms rather than an error, so a wrong guess here shows up as an empty column and not
   as a failed run — `usage.nas-ip-field` is the knob that fixes it without a rebuild.
+- `sessionInstances.bucketId` is the id `BUCKET_INSTANCE.BUCKET_ID` carries. The `BUCKET_INSTANCE`
+  extract no longer depends on that assumption — it asks by the bucket instance's own `ID` as well,
+  and counts how many rows that answered — but the dump still does, and a `UTLIZED_QUOTA` of 0 for
+  every user with a quota bucket is what a wrong one looks like.
 - `sessionInstances.serviceId` is the id of the `SERVICE_INSTANCE` the usage was charged to, which
   is what `BUCKET_INSTANCE.SERVICE_ID` points at and what the dump joins the bucket through. This
   is the one assumption behind `UTLIZED_QUOTA` that cannot be settled from the reporting side, and

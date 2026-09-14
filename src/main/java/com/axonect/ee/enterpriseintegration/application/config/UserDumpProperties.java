@@ -162,6 +162,46 @@ public class UserDumpProperties {
         private String nasIpField = "nasIpAddress.keyword";
 
         /**
+         * Field the composite aggregation groups the CDR documents by.
+         *
+         * <p>Left empty — the default — the lookup asks the cluster which spelling it can
+         * aggregate on and uses that: the field itself when it is mapped as a keyword, its
+         * {@code .keyword} sub-field when it is mapped as text. Set it to pin one spelling and
+         * skip the question.
+         *
+         * @see #bucketIdField
+         */
+        private String usernameField;
+
+        /**
+         * Field the CDR session instances name the bucket on, which is what a bucket's usage is
+         * looked up by.
+         *
+         * <p>This is the assumption behind every figure read from the CDRs, and the one that fails
+         * quietly: a terms aggregation on a field the mapping does not have is not an error in
+         * Elasticsearch — it comes back with no terms at all, so every bucket looks like a bucket
+         * the CDRs never drew on and every row is reported as a 0 while the documents hold the
+         * usage. That is what a whole column of zeroes next to real usage in the cluster means.
+         *
+         * <p>Left empty — the default — the lookup no longer assumes a spelling: it asks the
+         * cluster's own mapping which one is aggregatable, {@code sessionInstances.bucketId} or
+         * {@code sessionInstances.bucketId.keyword}, and reads the one that is. An index template
+         * that declares {@code sessionInstances} nested normally maps its sub-fields as plain
+         * keywords, where a dynamically mapped field would carry the sub-field, and the answer
+         * decides which of the two this deployment is. Set it to pin the field by name, for a
+         * mapping the question cannot settle — the way {@link #nasIpField} is set.
+         */
+        private String bucketIdField;
+
+        /**
+         * Field the CDR session instances name the bundle on, which is what scopes a bucket's
+         * total to the bundle that drew it. Resolved and overridden exactly as
+         * {@link #bucketIdField} is; a spelling the mapping does not have costs the scope rather
+         * than the figure, because an unscoped total is what the lookup falls back to.
+         */
+        private String serviceIdField;
+
+        /**
          * Whether sessionInstances is mapped as a nested type. When it is, usage can be summed
          * per bucket; when it is not, Elasticsearch flattens the array and a per-bucket sum would
          * silently attribute every instance's usage to every bucket the session touched, so the

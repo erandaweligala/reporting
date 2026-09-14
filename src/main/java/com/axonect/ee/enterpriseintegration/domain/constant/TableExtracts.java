@@ -23,7 +23,17 @@ public final class TableExtracts {
 
     /** The bucket extract's usage column, which is either the table's counter or the CDR total. */
     public static final String USAGE_COLUMN = "USAGE";
-    /** The bucket's id, which is what the CDR session instances key usage on. */
+    /**
+     * BUCKET_INSTANCE's own primary key. It is the second id a CDR session instance may name its
+     * bucket by — see {@link #BUCKET_ID_COLUMN} — so the usage lookup reads it from the row.
+     */
+    public static final String ID_COLUMN = "ID";
+    /**
+     * The plan's bucket, which is the first of the two ids the CDR session instances may key usage
+     * on. It names the plan's bucket rather than one instance of it, which is why the bundle is
+     * asked for beside it; {@link #ID_COLUMN} is the other, and is asked for where this finds
+     * nothing.
+     */
     public static final String BUCKET_ID_COLUMN = "BUCKET_ID";
     /** The SERVICE_INSTANCE the bucket belongs to, which is the bundle the usage is scoped to. */
     public static final String SERVICE_ID_COLUMN = "SERVICE_ID";
@@ -163,7 +173,7 @@ public final class TableExtracts {
      */
     private static List<Column> bucketInstanceColumns(Column usage) {
         return List.of(
-                Column.plain("ID", "b.ID"),
+                Column.plain(ID_COLUMN, "b.ID"),
                 Column.plain(BUCKET_ID_COLUMN, "b.BUCKET_ID"),
                 Column.plain("BUCKET_TYPE", "b.BUCKET_TYPE"),
                 Column.plain("CARRY_FORWARD", "b.CARRY_FORWARD"),

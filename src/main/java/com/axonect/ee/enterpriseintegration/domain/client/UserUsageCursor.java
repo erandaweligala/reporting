@@ -64,6 +64,49 @@ public abstract class UserUsageCursor implements AutoCloseable {
         }
 
         /**
+         * Usage to report against a bucket the caller can name two ways: the plan's bucket id the
+         * row carries, and the id of the bucket instance itself.
+         *
+         * <p>The second is asked only where the first found nothing, and exists because which of
+         * the two cdr-service stamps on a session instance is not something the reporting side can
+         * settle. {@code bucketId} names the plan's bucket, which is why the bundle has to be
+         * asked for alongside it; an id of the instance names one cycle's bucket outright and needs
+         * no bundle beside it. A deployment whose CDRs key usage on the instance reported a 0
+         * against every row — the figure that means "a bucket the CDRs never drew on" — while the
+         * documents held the usage, because the only id being asked for was the one they do not
+         * carry.
+         *
+         * <p>Trying the plan's bucket first keeps every figure that is already right exactly as it
+         * is: the instance id is only ever consulted for a row that would otherwise be that 0.
+         */
+        public long usageOn(String serviceId, String bucketId, String bucketInstanceId) {
+            if (!attributable) {
+                return total;
+            }
+            if (bucketId != null && !bucketId.isEmpty()) {
+                if (attributedTo(serviceId, bucketId)) {
+                    return perServiceBucket.get(serviceBucketKey(serviceId, bucketId));
+                }
+                Long forBucket = perBucket.get(bucketId);
+                if (forBucket != null) {
+                    return forBucket;
+                }
+            }
+            Long forInstance = drawnOnInstance(bucketInstanceId);
+            if (forInstance != null) {
+                return forInstance;
+            }
+            return bucketId == null || bucketId.isEmpty() ? total : 0L;
+        }
+
+        /** What the CDRs record against the bucket instance's own id, or null if they name none. */
+        private Long drawnOnInstance(String bucketInstanceId) {
+            return bucketInstanceId == null || bucketInstanceId.isEmpty()
+                    ? null
+                    : perBucket.get(bucketInstanceId);
+        }
+
+        /**
          * Usage to report against {@code bucketId} of the bundle {@code serviceId} names.
          *
          * <p>A bucket id is the plan's name for the bucket rather than an id of its own, so a
@@ -77,14 +120,7 @@ public abstract class UserUsageCursor implements AutoCloseable {
          * a zero would read as a subscriber who has used nothing at all.
          */
         public long usageOn(String serviceId, String bucketId) {
-            if (!attributable || bucketId == null || bucketId.isEmpty()) {
-                return total;
-            }
-            if (attributedTo(serviceId, bucketId)) {
-                return perServiceBucket.get(serviceBucketKey(serviceId, bucketId));
-            }
-            Long forBucket = perBucket.get(bucketId);
-            return forBucket != null ? forBucket : 0L;
+            return usageOn(serviceId, bucketId, null);
         }
 
         /**
@@ -100,7 +136,18 @@ public abstract class UserUsageCursor implements AutoCloseable {
          * figure they get is their whole total rather than a zero of that kind.
          */
         public boolean knowsBucket(String bucketId) {
-            return !attributable || perBucket.containsKey(bucketId);
+            return knowsBucket(bucketId, null);
+        }
+
+        /**
+         * As {@link #knowsBucket(String)}, for a caller that can also name the bucket by the id of
+         * the instance itself — the second id {@link #usageOn(String, String, String)} falls back
+         * to. A row answered by that id is not a row whose bucket the CDRs never name.
+         */
+        public boolean knowsBucket(String bucketId, String bucketInstanceId) {
+            return !attributable
+                    || perBucket.containsKey(bucketId)
+                    || drawnOnInstance(bucketInstanceId) != null;
         }
 
         /**

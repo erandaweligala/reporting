@@ -10,6 +10,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -149,5 +150,47 @@ class UsageAggregationClientTest {
                 () -> client.open(LocalDate.of(2026, 8, 22), null, null));
 
         assertSame(null, thrown.getCause());
+    }
+
+    @Test
+    void aggregatesOnTheFieldItselfWhereTheClusterCan() {
+        // An index template that declares sessionInstances nested normally maps its sub-fields as
+        // plain keywords, and a keyword is what a terms aggregation reads directly.
+        assertEquals("sessionInstances.bucketId",
+                UsageAggregationClient.spellingOf("sessionInstances.bucketId", null,
+                        Set.of("sessionInstances.bucketId")));
+    }
+
+    @Test
+    void fallsBackToTheKeywordSubFieldOfATextMapping() {
+        assertEquals("sessionInstances.bucketId.keyword",
+                UsageAggregationClient.spellingOf("sessionInstances.bucketId", null,
+                        Set.of("sessionInstances.bucketId.keyword")));
+    }
+
+    @Test
+    void aMappingThatAnswersNothingLeavesTheSpellingTheLookupHasAlwaysAssumed() {
+        // A cluster that will not answer the question is not a reason to fail a dump, and the
+        // sub-field is what every run before this one asked for.
+        assertEquals("userName.keyword",
+                UsageAggregationClient.spellingOf("userName", null, Set.of()));
+    }
+
+    @Test
+    void aFieldConfiguredByNameSkipsTheQuestionAltogether() {
+        // The last resort for a mapping the probe cannot settle — the same lever nas-ip-field is.
+        assertEquals("sessionInstances.bucket",
+                UsageAggregationClient.spellingOf("sessionInstances.bucketId", "sessionInstances.bucket",
+                        Set.of("sessionInstances.bucketId")));
+    }
+
+    @Test
+    void theCdrKeyFieldsAreResolvedRatherThanPinnedByDefault() {
+        assertNull(properties.getUsage().getBucketIdField(),
+                "asking the cluster which spelling it can aggregate on is the default; a terms "
+                        + "aggregation on a field the mapping does not have returns no terms "
+                        + "rather than an error, which is a column of zeroes and no way to see it");
+        assertNull(properties.getUsage().getServiceIdField());
+        assertNull(properties.getUsage().getUsernameField());
     }
 }

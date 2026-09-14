@@ -70,6 +70,19 @@ it alone would report a year of renewals against every one of that subscriber's 
 `usage.scope-to-service` is what splits it by the `serviceId` on each session instance, which is
 what `BUCKET_INSTANCE.SERVICE_ID` points at.
 
+Where the CDRs name neither, the row asks once more by the bucket instance's own `ID`. Which of the
+two ids cdr-service stamps on a session instance is not something the reporting side can settle,
+and getting it wrong is invisible in the file: every row comes out as the 0 that means "a bucket
+the CDRs never drew on" while the documents hold the usage. The plan's bucket still answers first,
+so a figure that is already right is never disturbed; the run says how many rows the second id
+answered:
+
+```
+BUCKET_INSTANCE found USAGE under the bucket instance's own ID for 3181902 of 3182044 row(s),
+whose BUCKET_ID the CDRs name nowhere — those CDRs key usage on BUCKET_INSTANCE.ID rather than on
+BUCKET_INSTANCE.BUCKET_ID
+```
+
 **How the two sides meet.** cdr-service groups its documents by `userName`, so a bucket's usage is
 reached through the subscriber holding its service rather than by the bucket's own id — which is
 the one thing that makes this extract's run differ from the other two:
@@ -111,8 +124,9 @@ instance, or no `BUCKET_ID`.
 
 **0** is a subscriber who *was* found, holding a bucket none of their session instances name. One
 such row is a bucket nothing has been drawn from — a bandwidth bucket, which no CDR keys usage on,
-is reported as 0 for exactly that reason. A whole file of them is the tell that the id the CDR keys
-usage on is not `BUCKET_INSTANCE.BUCKET_ID`.
+is reported as 0 for exactly that reason. A whole file of them is the tell that the run is asking
+for an id or a field the CDR documents do not carry; see
+[When the whole column is 0](#when-the-whole-column-is-0).
 
 Neither can be told from the other in the file, so the run counts both and says so when it ends:
 
@@ -128,6 +142,35 @@ bucket and CDR usage, and from the bucket's total across bundles for the rest
 A run reporting the second line's fallback for most of its rows is a deployment whose CDRs do not
 carry `SERVICE_INSTANCE.ID` in `serviceId`; `scope-to-service: false` is the honest setting until
 they do, and it reports the bucket's total across bundles for every row rather than for some.
+
+### When the whole column is 0
+
+A 0 on a row here and there is a bucket nothing was drawn from. A 0 on *every* row, next to CDR
+documents that plainly hold usage, is not a subscriber base that has used nothing — it is a run
+whose aggregation came back with no buckets at all, and there are two ways to get one.
+
+**The field the aggregation asks on.** A terms aggregation on a field the mapping does not have is
+not an error in Elasticsearch: it returns no terms. Asking for `sessionInstances.bucketId.keyword`
+against an index that maps `bucketId` as a plain keyword therefore returns nothing for every user,
+and every bucket looks like a bucket the CDRs never drew on. Which of the two mappings a cluster
+has is not something this side can assume — a dynamically mapped string carries the `.keyword`
+sub-field, and the explicit template that has to declare `sessionInstances` nested normally does
+not — so it is read rather than guessed: one field-capabilities call per cursor resolves each of
+`userName`, `sessionInstances.bucketId` and `sessionInstances.serviceId` to the spelling this
+cluster can aggregate on, and the run says which:
+
+```
+CDR usage is read from [radius-sessions-*] by userName.keyword, per bucket on
+sessionInstances.bucketId and per bundle on sessionInstances.serviceId, summing
+sessionInstances.usage
+```
+
+A field neither spelling can aggregate on gets a warning naming it, because nothing else would say
+so. `usage.bucket-id-field`, `usage.service-id-field` and `usage.username-field` pin a spelling by
+name for a mapping the question cannot settle — the same lever `usage.nas-ip-field` is.
+
+**The id the row asks by.** Covered above: the bucket instance's own `ID` is asked for wherever
+`BUCKET_ID` finds nothing, and the run counts how many rows that answered.
 
 Two caps bound what one subscriber can be asked for: `usage.buckets-per-user` (20) and
 `usage.services-per-user` (10). A subscriber whose CDRs name more buckets than that has the rest
@@ -305,6 +348,9 @@ report:
       services-per-user: 10      # bundles weighed against one of a subscriber's buckets
       nested: true               # off leaves the extract reporting the table's own counter
       instances-path: sessionInstances
+      # username-field:   userName.keyword               # unset: resolved from the mapping
+      # bucket-id-field:  sessionInstances.bucketId.keyword
+      # service-id-field: sessionInstances.serviceId.keyword
 ```
 
 Two reports read that figure and there is one definition of it, so a change here moves

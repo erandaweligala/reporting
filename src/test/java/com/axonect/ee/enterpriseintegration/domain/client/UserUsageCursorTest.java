@@ -191,4 +191,47 @@ class UserUsageCursorTest {
     void theEmptyCursorNeverMatches() {
         assertNull(UserUsageCursor.empty().forUser("alice"));
     }
+
+    @Test
+    void aBucketTheCdrsNameByTheInstanceIdIsFoundUnderThatIdRatherThanReportedAsAZero() {
+        // Which of the two ids cdr-service stamps on a session instance is not something the
+        // reporting side can settle, and asking for only one of them cost the whole figure: every
+        // row came out as the 0 that means "a bucket the CDRs never drew on" while the documents
+        // held the usage.
+        UserUsageCursor.UserUsage alice = attributed("alice", Map.of("4711", 100L));
+
+        assertEquals(100L, alice.usageOn("SVC-1", "DATA_1", "4711"),
+                "the row's own bucket instance is what the CDRs name it by");
+        assertTrue(alice.knowsBucket("DATA_1", "4711"),
+                "found under the second id, so not a bucket the CDRs never name");
+    }
+
+    @Test
+    void thePlanBucketAnswersFirstSoAFigureThatIsAlreadyRightIsNeverDisturbed() {
+        UserUsageCursor.UserUsage alice = perBundle("alice",
+                Map.of("DATA_1", 100L, "4711", 7L),
+                Map.of(key("SVC-1", "DATA_1"), 60L));
+
+        assertEquals(60L, alice.usageOn("SVC-1", "DATA_1", "4711"),
+                "the bundle's own share of the plan's bucket, as before");
+        assertEquals(100L, alice.usageOn("SVC-9", "DATA_1", "4711"),
+                "the bucket's total across bundles, as before — not the instance id");
+    }
+
+    @Test
+    void aBucketNeitherIdNamesIsStillTheZeroThatSaysSo() {
+        UserUsageCursor.UserUsage alice = attributed("alice", Map.of("DATA_1", 100L));
+
+        assertEquals(0L, alice.usageOn("SVC-1", "DATA_2", "4711"));
+        assertFalse(alice.knowsBucket("DATA_2", "4711"));
+    }
+
+    @Test
+    void anUnattributableUserStillReportsTheirWholeTotalWhateverIdIsAsked() {
+        UserUsageCursor.UserUsage alice = new UserUsageCursor.UserUsage(
+                "alice", Map.of(), Map.of(), 1000L, false, null);
+
+        assertEquals(1000L, alice.usageOn("SVC-1", "DATA_1", "4711"));
+        assertTrue(alice.knowsBucket("DATA_1", "4711"));
+    }
 }
