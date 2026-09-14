@@ -33,6 +33,7 @@ class BucketUsageColumnSourceTest {
     private static final int USAGE = SPEC.csvIndex(TableExtracts.USAGE_COLUMN);
     private static final int SERVICE_ID = SPEC.csvIndex(TableExtracts.SERVICE_ID_COLUMN);
     private static final int BUCKET_ID = SPEC.csvIndex(TableExtracts.BUCKET_ID_COLUMN);
+    private static final int INSTANCE_ID = SPEC.csvIndex(TableExtracts.ID_COLUMN);
 
     private static final String BUCKET = "SLT_DATA_100GB";
 
@@ -176,9 +177,14 @@ class BucketUsageColumnSourceTest {
 
     /** A row of the extract as the definition hands it over: every selected column already read. */
     private static String[] row(String serviceId, String bucketId) {
+        return row(serviceId, bucketId, "4711");
+    }
+
+    private static String[] row(String serviceId, String bucketId, String instanceId) {
         String[] row = new String[SPEC.columns().size()];
         row[SERVICE_ID] = serviceId;
         row[BUCKET_ID] = bucketId;
+        row[INSTANCE_ID] = instanceId;
         return row;
     }
 
@@ -186,5 +192,45 @@ class BucketUsageColumnSourceTest {
         ResultSet resultSet = mock(ResultSet.class);
         when(resultSet.getString(USER_NAME_COLUMN)).thenReturn(userName);
         return resultSet;
+    }
+
+    @Test
+    void aCdrThatNamesTheBucketInstanceRatherThanThePlansBucketIsStillFound() throws Exception {
+        // Which of the two ids cdr-service stamps on a session instance is not something this side
+        // can settle, and asking for only BUCKET_ID cost the whole column: every row came out as
+        // the 0 that means "a bucket the CDRs never drew on" while the documents held the usage.
+        BucketUsageColumnSource source = source(cursorOf(
+                user("taiwowilliams", Map.of("88001", 10L),
+                        Map.of(UserUsage.serviceBucketKey("svc-1", "88001"), 10L))), true);
+
+        String[] row = row("svc-1", BUCKET, "88001");
+        source.fill(resultSet("taiwowilliams"), row);
+
+        assertEquals("10", row[USAGE], "found under the bucket instance's own ID");
+        assertEquals(BUCKET, row[BUCKET_ID], "nothing else in the row is touched");
+    }
+
+    @Test
+    void thePlansBucketStillAnswersFirstSoAFigureThatIsAlreadyRightIsNeverDisturbed() throws Exception {
+        BucketUsageColumnSource source = source(cursorOf(
+                user("taiwowilliams", Map.of(BUCKET, 900L, "88001", 10L),
+                        Map.of(UserUsage.serviceBucketKey("svc-1", BUCKET), 500L))), true);
+
+        String[] row = row("svc-1", BUCKET, "88001");
+        source.fill(resultSet("taiwowilliams"), row);
+
+        assertEquals("500", row[USAGE], "the bundle's own share of the plan's bucket, as before");
+    }
+
+    @Test
+    void aBucketNeitherIdNamesIsStillTheZeroThatSaysSo() throws Exception {
+        BucketUsageColumnSource source = source(cursorOf(
+                user("taiwowilliams", Map.of("SLT_NIGHT_50GB", 120L),
+                        Map.of(UserUsage.serviceBucketKey("svc-1", "SLT_NIGHT_50GB"), 120L))), true);
+
+        String[] row = row("svc-1", BUCKET, "88001");
+        source.fill(resultSet("taiwowilliams"), row);
+
+        assertEquals("0", row[USAGE]);
     }
 }

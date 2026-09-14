@@ -7,8 +7,10 @@ import co.elastic.clients.elasticsearch._types.aggregations.Aggregation;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeAggregationSource;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeBucket;
 import co.elastic.clients.elasticsearch._types.aggregations.StringTermsBucket;
+import co.elastic.clients.elasticsearch.core.FieldCapsResponse;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.core.field_caps.FieldCapability;
 import co.elastic.clients.json.JsonData;
 import com.axonect.ee.enterpriseintegration.application.config.UserDumpProperties;
 import com.axonect.ee.enterpriseintegration.domain.exception.ReportClientException;
@@ -24,8 +26,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Aggregates each user's CDR usage out of Elasticsearch, one username at a time.
@@ -50,6 +54,12 @@ import java.util.Map;
  * number per user per bucket and pages deterministically through {@code after_key} with no scroll
  * context left open on the cluster.
  *
+ * <p>Which spelling of each of those fields the aggregation asks for is read from the cluster's
+ * mapping rather than assumed — see {@link #resolveFields}. A terms aggregation on a field the
+ * mapping does not have returns no terms instead of an error, so a wrong assumption there does not
+ * fail a run: it empties the per-bucket split and turns every figure into a 0 that reads as a
+ * bucket nothing was ever drawn from.
+ *
  * <p>The same pass also reports each user's NAS IP address, which AAA_USER does not carry: it is
  * the {@code nasIpAddress} cdr-service records on the session document from the CDR every
  * accounting event carries. That column is the reported day's, not the lifetime's, so it is read
@@ -71,9 +81,17 @@ public class UsageAggregationClient {
     private static final String AGG_USAGE = "usage";
     private static final String AGG_REPORTED_DAY = "reported_day";
     private static final String AGG_NAS_IP = "nas_ip";
-    private static final String USERNAME_FIELD = "userName.keyword";
     /** Metadata field the NAS filter pins to the reported day's own index. */
     private static final String INDEX_FIELD = "_index";
+
+    /** Sub-field a text mapping carries the aggregatable copy of a string field under. */
+    private static final String KEYWORD_SUFFIX = ".keyword";
+    /** Root field cdr-service groups its session documents by. */
+    private static final String USERNAME_PATH = "userName";
+    /** Session-instance fields, relative to the instances path. */
+    private static final String BUCKET_ID_PATH = ".bucketId";
+    private static final String SERVICE_ID_PATH = ".serviceId";
+    private static final String USAGE_PATH = ".usage";
 
     private final ObjectProvider<ElasticsearchClient> clientProvider;
     private final UserDumpProperties properties;
@@ -175,8 +193,164 @@ public class UsageAggregationClient {
         if (client == null) {
             throw new ReportClientException("Elasticsearch client is not configured for the usage lookup", null);
         }
-        return new CompositeUsageCursor(
-                client, indicesThroughToday(), reportedDayIndex, usernameFrom, usernameTo, usage);
+        List<String> indices = indicesThroughToday();
+        return new CompositeUsageCursor(client, indices, reportedDayIndex, usernameFrom, usernameTo,
+                usage, resolveFields(client, indices, usage));
+    }
+
+    /**
+     * The spelling of each CDR field the aggregation reads, as this cluster's mapping actually has
+     * it.
+     *
+     * @param userName  field the documents are grouped by
+     * @param bucketId  field a session instance names its bucket on
+     * @param serviceId field a session instance names its bundle on
+     * @param usage     field the usage delta is summed from, which has no spelling to settle
+     */
+    record CdrFields(String userName, String bucketId, String serviceId, String usage) {
+    }
+
+    /**
+     * Works out which spelling of each CDR field to aggregate on, by asking the cluster's own
+     * mapping rather than assuming one.
+     *
+     * <p>This exists because the assumption failed silently, and cost the whole figure. A terms
+     * aggregation on a field the mapping does not have is not an error in Elasticsearch — it comes
+     * back with no terms at all. Asking for {@code sessionInstances.bucketId.keyword} against an
+     * index that maps {@code bucketId} as a plain keyword therefore returns no buckets for any
+     * user, every row looks like a bucket the CDRs never drew on, and
+     * {@link UserUsageCursor.UserUsage#usageOn} reports the 0 that means exactly that — a whole
+     * column of zeroes beside CDR documents that hold the usage. Which of the two mappings a
+     * deployment has is not something the reporting side can know: a dynamically mapped string
+     * carries the sub-field, and the explicit template that has to declare {@code sessionInstances}
+     * nested normally does not.
+     *
+     * <p>So it is read rather than assumed, once per cursor — one field-capabilities call against
+     * the same index expression, next to a scan of every session document the cluster holds. A
+     * field configured by name skips the question; a cluster that will not answer it falls back to
+     * the sub-field spelling this has always used, so the lookup is never worse off than before.
+     */
+    private CdrFields resolveFields(ElasticsearchClient client, List<String> indices,
+                                    UserDumpProperties.Usage usage) {
+        String instances = usage.getInstancesPath();
+        String bucketPath = instances + BUCKET_ID_PATH;
+        String servicePath = instances + SERVICE_ID_PATH;
+        String usagePath = instances + USAGE_PATH;
+
+        String configuredUserName = configured(usage.getUsernameField());
+        String configuredBucket = configured(usage.getBucketIdField());
+        String configuredService = configured(usage.getServiceIdField());
+
+        boolean askCluster = configuredUserName == null || configuredBucket == null
+                || configuredService == null;
+        Set<String> aggregatable = askCluster
+                ? aggregatableFields(client, indices, List.of(
+                        USERNAME_PATH, USERNAME_PATH + KEYWORD_SUFFIX,
+                        bucketPath, bucketPath + KEYWORD_SUFFIX,
+                        servicePath, servicePath + KEYWORD_SUFFIX,
+                        usagePath))
+                : Set.of();
+
+        CdrFields fields = new CdrFields(
+                spellingOf(USERNAME_PATH, configuredUserName, aggregatable),
+                spellingOf(bucketPath, configuredBucket, aggregatable),
+                spellingOf(servicePath, configuredService, aggregatable),
+                usagePath);
+
+        log.info("CDR usage is read from {} by {}, per bucket on {} and per bundle on {}, summing {}",
+                indices, fields.userName(), fields.bucketId(), fields.serviceId(), fields.usage());
+        if (askCluster && !aggregatable.isEmpty()) {
+            warnUnaggregatable(indices, aggregatable, fields, usage);
+        }
+        return fields;
+    }
+
+    /**
+     * Which spelling of {@code path} to aggregate on: the one configured by name, else the field
+     * itself where the cluster can aggregate on it — a keyword mapping — else its {@code .keyword}
+     * sub-field, which is both what a text mapping carries and what this lookup assumed before it
+     * asked.
+     */
+    static String spellingOf(String path, String configured, Set<String> aggregatable) {
+        if (configured != null) {
+            return configured;
+        }
+        return aggregatable.contains(path) ? path : path + KEYWORD_SUFFIX;
+    }
+
+    /** A configured field name, or null where the spelling is left to be resolved. */
+    private static String configured(String field) {
+        return field == null || field.isBlank() ? null : field.trim();
+    }
+
+    /**
+     * Says so when a field the figure depends on is one the cluster cannot aggregate on under
+     * either spelling, because nothing else will: the aggregation answers with no terms rather
+     * than with an error, and what follows is a column of plausible-looking zeroes. Only the
+     * fields this run actually reads are checked — a flattened mapping reads none of the two
+     * instance keys, and an unscoped total reads no bundle.
+     */
+    private void warnUnaggregatable(List<String> indices, Set<String> aggregatable,
+                                    CdrFields fields, UserDumpProperties.Usage usage) {
+        if (!aggregatable.contains(fields.usage())) {
+            log.warn("The CDR documents in {} carry no aggregatable {}, so every total summed from "
+                    + "them will be 0", indices, fields.usage());
+        }
+        if (!usage.isNested()) {
+            return;
+        }
+        if (!aggregatable.contains(fields.bucketId())) {
+            log.warn("The CDR documents in {} carry no aggregatable {} — no usage can be attributed "
+                            + "to a bucket, so every bucket will look like one the CDRs never drew "
+                            + "on and USAGE will be 0 on every row. Set "
+                            + "report.user-dump.usage.bucket-id-field to the field cdr-service "
+                            + "names the bucket on",
+                    indices, fields.bucketId());
+        }
+        if (usage.isScopeToService() && !aggregatable.contains(fields.serviceId())) {
+            log.warn("The CDR documents in {} carry no aggregatable {}, so a bucket's total cannot "
+                            + "be scoped to the bundle that drew it and every row falls back to "
+                            + "the total across bundles. Set "
+                            + "report.user-dump.usage.service-id-field, or scope-to-service: false "
+                            + "to stop asking",
+                    indices, fields.serviceId());
+        }
+    }
+
+    /**
+     * Which of {@code candidates} this cluster can aggregate on, read from the field capabilities
+     * of the same indices the usage is summed over.
+     *
+     * <p>Best effort by design: a cluster that will not answer leaves the spellings as they were
+     * and the run carries on, because a mapping question is not a reason to fail a dump.
+     */
+    private Set<String> aggregatableFields(ElasticsearchClient client, List<String> indices,
+                                           List<String> candidates) {
+        try {
+            FieldCapsResponse response = client.fieldCaps(f -> f
+                    .index(indices)
+                    .fields(candidates)
+                    // The same tolerance the aggregation is opened with: a day rolled away, or a
+                    // cluster holding no session index yet, is not a failure of the lookup.
+                    .allowNoIndices(true)
+                    .ignoreUnavailable(true));
+
+            Set<String> aggregatable = new LinkedHashSet<>();
+            for (Map.Entry<String, Map<String, FieldCapability>> field : response.fields().entrySet()) {
+                for (FieldCapability capability : field.getValue().values()) {
+                    if (capability.aggregatable()) {
+                        aggregatable.add(field.getKey());
+                        break;
+                    }
+                }
+            }
+            return aggregatable;
+
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not read the CDR field mapping from {}; the usage lookup falls back to "
+                    + "the {} spellings it has always assumed", indices, KEYWORD_SUFFIX, e);
+            return Set.of();
+        }
     }
 
     /**
@@ -191,6 +365,7 @@ public class UsageAggregationClient {
         private final String usernameFrom;
         private final String usernameTo;
         private final UserDumpProperties.Usage config;
+        private final CdrFields fields;
 
         private final Deque<UserUsage> page = new ArrayDeque<>();
         private Map<String, FieldValue> afterKey;
@@ -198,13 +373,15 @@ public class UsageAggregationClient {
 
         private CompositeUsageCursor(ElasticsearchClient client, List<String> indices,
                                      String reportedDayIndex, String usernameFrom,
-                                     String usernameTo, UserDumpProperties.Usage config) {
+                                     String usernameTo, UserDumpProperties.Usage config,
+                                     CdrFields fields) {
             this.client = client;
             this.indices = indices;
             this.reportedDayIndex = reportedDayIndex;
             this.usernameFrom = usernameFrom;
             this.usernameTo = usernameTo;
             this.config = config;
+            this.fields = fields;
         }
 
         @Override
@@ -241,7 +418,7 @@ public class UsageAggregationClient {
         private SearchRequest buildRequest() {
             Map<String, CompositeAggregationSource> source = Map.of(
                     USER_SOURCE,
-                    CompositeAggregationSource.of(s -> s.terms(t -> t.field(USERNAME_FIELD))));
+                    CompositeAggregationSource.of(s -> s.terms(t -> t.field(fields.userName()))));
 
             Aggregation byUser = new Aggregation.Builder()
                     .composite(c -> {
@@ -266,7 +443,7 @@ public class UsageAggregationClient {
 
             if (usernameFrom != null || usernameTo != null) {
                 request.query(q -> q.bool(b -> b.filter(f -> f.range(r -> {
-                    r.field(USERNAME_FIELD);
+                    r.field(fields.userName());
                     if (usernameFrom != null) {
                         r.gte(JsonData.of(usernameFrom));
                     }
@@ -282,7 +459,7 @@ public class UsageAggregationClient {
 
         private Map<String, Aggregation> subAggregations() {
             String instancesPath = config.getInstancesPath();
-            String usageField = instancesPath + ".usage";
+            String usageField = fields.usage();
 
             Map<String, Aggregation> aggregations = new HashMap<>(4);
             // Null means no column is being filled from it, which is the bucket extract: it has no
@@ -301,8 +478,8 @@ public class UsageAggregationClient {
             }
 
             Aggregation byBucket = new Aggregation.Builder()
-                    .terms(t -> t.field(instancesPath + ".bucketId.keyword").size(config.getBucketsPerUser()))
-                    .aggregations(bucketTotals(instancesPath, usageField))
+                    .terms(t -> t.field(fields.bucketId()).size(config.getBucketsPerUser()))
+                    .aggregations(bucketTotals(usageField))
                     .build();
 
             Aggregation instances = new Aggregation.Builder()
@@ -324,14 +501,14 @@ public class UsageAggregationClient {
          * turns out not to be the SERVICE_INSTANCE.ID the database joined on, and it is also what
          * carries usage from any instance whose CDR named no service at all.
          */
-        private Map<String, Aggregation> bucketTotals(String instancesPath, String usageField) {
+        private Map<String, Aggregation> bucketTotals(String usageField) {
             Aggregation total = Aggregation.of(a -> a.sum(s -> s.field(usageField)));
             if (!config.isScopeToService()) {
                 return Map.of(AGG_USAGE, total);
             }
 
             Aggregation byService = new Aggregation.Builder()
-                    .terms(t -> t.field(instancesPath + ".serviceId.keyword").size(config.getServicesPerUser()))
+                    .terms(t -> t.field(fields.serviceId()).size(config.getServicesPerUser()))
                     .aggregations(AGG_USAGE, u -> u.sum(s -> s.field(usageField)))
                     .build();
 
