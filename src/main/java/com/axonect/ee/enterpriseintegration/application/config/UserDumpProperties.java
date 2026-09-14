@@ -125,6 +125,13 @@ public class UserDumpProperties {
          * Maximum distinct service instances counted against one of that user's buckets. A
          * subscriber holds one bundle at a time, so this only has to be wide enough to see past
          * the cycles behind the current one.
+         *
+         * <p>It also decides when a bucket's split can be read as the whole of who drew on it. A
+         * split the aggregation returned in full lets a bundle missing from it be reported as
+         * having drawn nothing; one it had to truncate cannot say that, so those rows fall back to
+         * the bucket's total across bundles instead. Widening this is what turns such a fallback
+         * back into a scoped figure — BUCKET_INSTANCE is the report that notices, since it asks
+         * once per bucket instance rather than once per subscriber.
          */
         private int servicesPerUser = 10;
 

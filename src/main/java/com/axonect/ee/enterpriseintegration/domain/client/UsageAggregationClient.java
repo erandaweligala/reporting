@@ -6,6 +6,7 @@ import co.elastic.clients.elasticsearch._types.aggregations.Aggregate;
 import co.elastic.clients.elasticsearch._types.aggregations.Aggregation;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeAggregationSource;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeBucket;
+import co.elastic.clients.elasticsearch._types.aggregations.StringTermsAggregate;
 import co.elastic.clients.elasticsearch._types.aggregations.StringTermsBucket;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
@@ -24,8 +25,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Aggregates each user's CDR usage out of Elasticsearch, one username at a time.
@@ -379,33 +382,46 @@ public class UsageAggregationClient {
 
             Map<String, Long> perBucket = new HashMap<>(Math.max(4, bucketTerms.size() * 2));
             Map<String, Long> perServiceBucket = new HashMap<>(Math.max(4, bucketTerms.size() * 2));
+            Set<String> splitBuckets = new HashSet<>(Math.max(4, bucketTerms.size() * 2));
             long total = 0L;
             for (StringTermsBucket term : bucketTerms) {
                 String bucketId = term.key().stringValue();
                 long value = (long) term.aggregations().get(AGG_USAGE).sum().value();
                 perBucket.put(bucketId, value);
                 total += value;
-                splitByService(term, bucketId, perServiceBucket);
+                if (splitByService(term, bucketId, perServiceBucket)) {
+                    splitBuckets.add(bucketId);
+                }
             }
-            return new UserUsage(userName, perBucket, perServiceBucket, total, true, nasIpAddress);
+            return new UserUsage(
+                    userName, perBucket, perServiceBucket, splitBuckets, total, true, nasIpAddress);
         }
 
         /**
          * Records the bundle-by-bundle split of one bucket's total, where the dump asked for one.
          * A cluster whose CDRs never named a service answers with no terms, which is the same
          * shape as scoping being switched off and lands on the same fallback.
+         *
+         * @return whether the split can be read as the whole of who drew on this bucket, which is
+         *         what lets a bundle it does not name be reported as having drawn nothing rather
+         *         than as the bucket's total across bundles. A terms aggregation that left
+         *         documents out — more bundles touched the bucket than {@code services-per-user}
+         *         has room for — cannot say that, and neither can one that came back empty
          */
-        private void splitByService(StringTermsBucket bucketTerm, String bucketId,
-                                    Map<String, Long> perServiceBucket) {
+        private boolean splitByService(StringTermsBucket bucketTerm, String bucketId,
+                                       Map<String, Long> perServiceBucket) {
             Aggregate byService = bucketTerm.aggregations().get(AGG_BY_SERVICE);
             if (byService == null || !byService.isSterms()) {
-                return;
+                return false;
             }
-            for (StringTermsBucket service : byService.sterms().buckets().array()) {
+            StringTermsAggregate split = byService.sterms();
+            List<StringTermsBucket> services = split.buckets().array();
+            for (StringTermsBucket service : services) {
                 long value = (long) service.aggregations().get(AGG_USAGE).sum().value();
                 perServiceBucket.put(
                         UserUsage.serviceBucketKey(service.key().stringValue(), bucketId), value);
             }
+            return !services.isEmpty() && split.sumOtherDocCount() == 0L;
         }
 
         /**

@@ -6,6 +6,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,6 +40,13 @@ class UserUsageCursorTest {
                                                        Map<String, Long> perServiceBucket) {
         long total = buckets.values().stream().mapToLong(Long::longValue).sum();
         return new UserUsageCursor.UserUsage(user, buckets, perServiceBucket, total, true, "10.20.30.40");
+    }
+
+    /** A user one of whose buckets the CDRs split by bundle in full, and that split. */
+    private static UserUsageCursor.UserUsage split(String user, String bucketId, long total,
+                                                   Map<String, Long> perServiceBucket) {
+        return new UserUsageCursor.UserUsage(user, Map.of(bucketId, total), perServiceBucket,
+                Set.of(bucketId), total, true, "10.20.30.40");
     }
 
     private static String key(String serviceId, String bucketId) {
@@ -167,6 +175,47 @@ class UserUsageCursorTest {
         assertFalse(day.attributedTo("SVC-UNKNOWN", "DATA_1"),
                 "the dump counts this per shard, so a wrong assumption shows up in the log");
         assertTrue(day.attributedTo("SVC-OLD", "DATA_1"));
+    }
+
+    @Test
+    void aBundleMissingFromASplitThatNamesThemAllDrewNothing() {
+        // The other side of the fallback above, and the reason the two are told apart. Where the
+        // CDRs did name a bundle for every delta and the aggregation had room for all of them, a
+        // bundle the split leaves out drew nothing — and reporting the bucket's total across
+        // bundles instead is exactly what scope-to-service exists to prevent: every cycle's usage
+        // reported against one cycle's bucket.
+        UserUsageCursor.UserUsage alice = split("alice", "DATA_1", 1000L,
+                Map.of(key("SVC-OLD", "DATA_1"), 900L, key("SVC-NOW", "DATA_1"), 100L));
+
+        assertEquals(100L, alice.usageOn("SVC-NOW", "DATA_1"));
+        assertEquals(0L, alice.usageOn("SVC-NEXT", "DATA_1"),
+                "a cycle that has drawn nothing yet, not one that has drawn everything");
+        assertEquals(1000L, alice.usageOn(null, "DATA_1"),
+                "with the scope off the bucket across bundles is still what is reported");
+    }
+
+    @Test
+    void aBucketCanBeAskedForByEitherOfTheTwoIdsTheDatabaseHoldsForIt() {
+        // A session instance's bucketId is BUCKET_INSTANCE.BUCKET_ID on one deployment and
+        // BUCKET_INSTANCE.ID on another. Only a caller holding both — the bucket extract, which is
+        // a row of that table — can offer the second; the dump reaches its bucket through the plan
+        // and passes the plan's id alone, which is why that one is tried first.
+        UserUsageCursor.UserUsage alice = split("alice", "BI-77", 640L,
+                Map.of(key("SVC-NOW", "BI-77"), 640L));
+
+        assertEquals(640L, alice.usageOn("SVC-NOW", "DATA_1", "BI-77"));
+        assertTrue(alice.knowsBucket("DATA_1", "BI-77"));
+        assertEquals(0L, alice.usageOn("SVC-NOW", "DATA_1"),
+                "asked by the plan's bucket alone it is a bucket the CDRs never name");
+    }
+
+    @Test
+    void theBucketTheCdrsNamedUnderNeitherIdIsAZeroAndNotTheSubscribersWholeUsage() {
+        UserUsageCursor.UserUsage alice = attributed("alice", Map.of("VOICE_1", 900L));
+
+        assertEquals(0L, alice.usageOn("SVC-NOW", "DATA_1", "BI-77"));
+        assertFalse(alice.knowsBucket("DATA_1", "BI-77"),
+                "counted, so a file of zeroes can be diagnosed from the run that wrote it");
     }
 
     @Test

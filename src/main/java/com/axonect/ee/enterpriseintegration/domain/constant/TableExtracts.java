@@ -25,6 +25,16 @@ public final class TableExtracts {
     public static final String USAGE_COLUMN = "USAGE";
     /** The bucket's id, which is what the CDR session instances key usage on. */
     public static final String BUCKET_ID_COLUMN = "BUCKET_ID";
+    /**
+     * The bucket instance's own id — the second id a session instance's {@code bucketId} can be.
+     *
+     * <p>{@link #BUCKET_ID_COLUMN} names the <em>plan's</em> bucket, and it is the only one the
+     * user data dump can ask by: the bucket it reports is reached through the plan. This extract is
+     * a row of BUCKET_INSTANCE, so it holds both, and asking by both is what keeps its USAGE a real
+     * figure on a deployment whose cdr-service keys usage on the row rather than on the plan —
+     * where asking by the plan's bucket alone reports a column of zeros.
+     */
+    public static final String BUCKET_INSTANCE_ID_COLUMN = "ID";
     /** The SERVICE_INSTANCE the bucket belongs to, which is the bundle the usage is scoped to. */
     public static final String SERVICE_ID_COLUMN = "SERVICE_ID";
     /**
