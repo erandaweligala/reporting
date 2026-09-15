@@ -104,7 +104,7 @@ public class TableExtractReportsConfig {
                         + "bundle each bucket belongs to — the figure USER_DATA_DUMP reports as "
                         + "UTLIZED_QUOTA",
                 usage.getIndex(), usage.isScopeToService() ? "scoped" : "unscoped");
-        if (!usage.isNested()) {
+        if (!usage.isNestedTable()) {
             log.info("BUCKET_INSTANCE.USAGE cannot be split per bucket: "
                             + "report.user-dump.usage.nested is off, so each subscriber's whole "
                             + "CDR total — the figure USER_DATA_DUMP reports for them as "

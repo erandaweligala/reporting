@@ -157,10 +157,6 @@ public final class UserDumpSql {
            .append("        u.NAS_PORT_TYPE, mac.ORIGINAL_MAC_ADDRESS, u.REMOTE_ID, u.REQUEST_ID,")
            .append("        u.SESSION_TIMEOUT, u.STATUS, u.SUBSCRIPTION,")
            .append("        ").append(asText("u.UPDATED_DATE", fmt, "UPDATED_DATE")).append(",")
-           // AAA_USER carries no SLMN column, so the dump reports the username under it, and no
-           // NOTIFICATION_TEMPLATES column, so it reports TEMPLATE_ID under that name. There is no
-           // NAS_IP_ADDRESS column either — that one is filled from the CDR session documents in
-           // Elasticsearch, so nothing is selected for it here.
            .append("        u.USER_NAME AS SLMN, u.VLAN_ID, u.TEMPLATE_ID AS NOTIFICATION_TEMPLATES,")
            .append("        ").append(asText("u.ACTIVATION_DATE", fmt, "CUSTOMER_ACTIVATION_DATE")).append(",")
            .append("        ").append(asText("svc.SERVICE_START_DATE", fmt, "BUNDLE_ACTIVATION_DATE")).append(",")

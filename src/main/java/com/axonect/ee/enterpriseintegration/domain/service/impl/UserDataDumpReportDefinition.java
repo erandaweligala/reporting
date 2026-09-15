@@ -38,23 +38,6 @@ import java.util.concurrent.Executor;
  *
  * <p>Shape of the run, and why:
  *
- * <p>NAS_IP_ADDRESS has no AAA_USER column behind it, so the dump statement selects nothing for
- * it and the value is spliced in here from the CDR session documents cdr-service writes to
- * Elasticsearch — out of the same per-user stream that already carries UTLIZED_QUOTA, so it costs
- * no extra round trip. SLMN has no column either, but a stand-in worth binding: the dump
- * statement selects the username in its place.
- *
- * <p>UTLIZED_QUOTA is the total the reported bundle has drawn from its quota bucket, which is what
- * makes it readable next to QUOTA, the bucket's whole allowance. cdr-service keeps no such total:
- * it records a usage delta per accounting event, tagged with the bucket and the service instance
- * it was drawn against, so the total is summed over every CDR index the cluster holds — today's
- * among them — and asked for by the pair the dump statement carries in its last two columns.
- *
- * <p>Which of the two Elasticsearch-filled columns a user is missing says why. Both empty is a
- * user the aggregation never returned: no session document anywhere in the scan, under that
- * username. A figure of 0 beside a filled NAS address is the opposite — the user was found, and
- * the bucket the database named is not one their CDRs drew on. The shard log counts both, because
- * neither can be told from the other in the file.
  *
  * <p>The cursor hands out one row per MAC address rather than one row per user: collapsing the
  * addresses in SQL would mean LISTAGG, which is the construct the server rejects (see

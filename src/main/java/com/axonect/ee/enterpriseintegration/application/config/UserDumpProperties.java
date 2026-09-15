@@ -176,6 +176,8 @@ public class UserDumpProperties {
          */
         private boolean nested = true;
 
+        private boolean nestedTable = true;
+
         /** Path of the session instance array inside the CDR session document. */
         private String instancesPath = "sessionInstances";
 
