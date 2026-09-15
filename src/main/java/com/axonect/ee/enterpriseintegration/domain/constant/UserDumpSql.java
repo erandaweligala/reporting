@@ -16,7 +16,9 @@ import java.util.List;
  *       picked with ROW_NUMBER() instead of a correlated sub-select.</li>
  *   <li>{@code bkt} — BUCKET_INSTANCE collapsed to one row per service with the bandwidth and the
  *       quota bucket pivoted into columns by conditional aggregation. It joins {@code svc} so the
- *       optimizer prunes it to the shard's users instead of scanning the whole table.</li>
+ *       optimizer prunes it to the shard's users instead of scanning the whole table. What each
+ *       pivot reports is the column the dump asks of that bucket: PLAN_BANDWIDTH is the bandwidth
+ *       bucket's RULE — the rate the plan grants — and QUOTA the quota bucket's INITIAL_BALANCE.</li>
  * </ul>
  *
  * <p>The MAC addresses are the one satellite table that is <em>not</em> folded into an aggregate.
@@ -105,7 +107,8 @@ public final class UserDumpSql {
      * @param usernameTo      exclusive upper bound of the shard's username range, null for open
      * @param dayStart        start of the reported day (inclusive)
      * @param dayEnd          start of the following day (exclusive)
-     * @param bandwidthBucket BUCKET_INSTANCE.BUCKET_TYPE holding the plan bandwidth
+     * @param bandwidthBucket BUCKET_INSTANCE.BUCKET_TYPE of the bucket whose RULE is the plan
+     *                        bandwidth
      * @param quotaBucket     BUCKET_INSTANCE.BUCKET_TYPE holding the data quota
      * @param dateFormat      Oracle format model applied to every timestamp column
      */
@@ -136,7 +139,9 @@ public final class UserDumpSql {
         sql.append(" ) s WHERE s.RN = 1")
            .append("), bkt AS (")
            .append(" SELECT b.SERVICE_ID,")
-           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS PLAN_BANDWIDTH,")
+           // The bandwidth the plan grants is the bucket's RULE — the rate rule the bucket is
+           // policed by — not its BUCKET_ID, which names the bucket the rule belongs to.
+           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.RULE END) AS PLAN_BANDWIDTH,")
            // An unlimited bucket has no balance to report, and the consumer reads an empty QUOTA
            // as "no cap" — so it is filtered out here rather than labelled.
            .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? AND NVL(b.IS_UNLIMITED, 0) <> 1")
