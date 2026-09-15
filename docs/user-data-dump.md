@@ -11,7 +11,7 @@ that make it survive that row count, and the settings an operator needs.
 | `USER_ID`, and every column not listed below | `AAA_USER` |
 | `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, one cursor row each, comma-joined per user as the rows are read (see below) |
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
-| `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
+| `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` — `RULE` of the bandwidth bucket, `INITIAL_BALANCE` of the quota bucket |
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
 | `NOTIFICATION_TEMPLATES` | `AAA_USER.TEMPLATE_ID` — there is no column of that name either |
 | `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
@@ -383,8 +383,10 @@ starting point, not a maximum.
   `AAA_USER`. The sample extract carries three comma-separated values in both columns, which only
   the per-MAC table can produce. `AAA_USER_MAC_ADDRESS.ID` is what orders a user's addresses within
   their row.
-- `BUCKET_INSTANCE.BUCKET_TYPE` distinguishes the bandwidth bucket from the data bucket, and
-  `BUCKET_ID` carries the bandwidth name (`FTTH_50Mbps` in the sample). Both type values are
+- `BUCKET_INSTANCE.BUCKET_TYPE` distinguishes the bandwidth bucket from the data bucket, and the
+  bandwidth bucket's `RULE` — the rate rule it is policed by — is what the dump reports as
+  `PLAN_BANDWIDTH` (`FTTH_50Mbps` in the sample). `BUCKET_ID` names the bucket that rule belongs
+  to and is read only as the key the `UTLIZED_QUOTA` lookup is asked with. Both type values are
   configurable above. `IS_UNLIMITED = 1` marks a bucket with no cap, and such a bucket is reported
   as an empty `QUOTA`.
 - `CYCLE_DATE` is not a timestamp. It is the one date-named column the dump does not run through

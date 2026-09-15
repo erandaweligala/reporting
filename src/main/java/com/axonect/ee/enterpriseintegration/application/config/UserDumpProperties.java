@@ -80,7 +80,7 @@ public class UserDumpProperties {
      */
     private boolean excelSafeTimestamps = true;
 
-    /** BUCKET_INSTANCE.BUCKET_TYPE that carries the plan bandwidth. */
+    /** BUCKET_INSTANCE.BUCKET_TYPE whose RULE is the plan bandwidth. */
     private String bandwidthBucketType = "BANDWIDTH";
 
     /** BUCKET_INSTANCE.BUCKET_TYPE that carries the data quota. */

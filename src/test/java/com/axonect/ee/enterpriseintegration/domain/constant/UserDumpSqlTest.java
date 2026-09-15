@@ -123,6 +123,20 @@ class UserDumpSqlTest {
     }
 
     @Test
+    void reportsThePlanBandwidthFromTheBucketsRuleRatherThanItsBucketId() {
+        String sql = build(null, null).sql();
+
+        // The bandwidth bucket's RULE is the rate the plan grants; BUCKET_ID only names the bucket
+        // that rule belongs to, and reporting it put the bucket's name in the column instead.
+        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.RULE END) AS PLAN_BANDWIDTH"),
+                "PLAN_BANDWIDTH must be pivoted out of BUCKET_INSTANCE.RULE");
+        // The quota bucket's id is still read by BUCKET_ID: it is what the usage lookup is asked
+        // with, not a column of the dump.
+        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS QUOTA_BUCKET_ID"),
+                "the helper column keeps naming the plan's bucket");
+    }
+
+    @Test
     void carriesNothingThatDependsOnTheServerVersionToParse() {
         String sql = build("a", "m").sql();
 
