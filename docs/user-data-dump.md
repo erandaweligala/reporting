@@ -30,7 +30,9 @@ statement did at first — costs the whole dump rather than the one column: Orac
 statement with **ORA-00904 (invalid identifier)** on every shard of every run, the same way it
 rejects a construct its parser does not know. `NAS_IP_ADDRESS` has no stand-in worth binding — it
 is the `nasIpAddress` cdr-service records on the session document from the CDR every accounting
-event carries, so the statement selects nothing in that position and
+event carries — under whichever of the two spellings that index's mapping makes aggregatable, which
+the dump resolves rather than assumes (see below) — so the statement selects nothing in that
+position and
 `UserDataDumpReportDefinition` splices the value in as it lays the row out, from the same
 Elasticsearch pass that already produces `UTLIZED_QUOTA` rather than from a lookup of its own. A
 user whose sessions named more than one NAS that day is reported under the one most of them used;
@@ -150,6 +152,59 @@ bucket through the plan and has only `BUCKET_ID` to offer — see `docs/table-ex
 `NAS_IP_ADDRESS` comes out of the same pass and is **not** a lifetime figure — it is still the NAS
 that day's sessions were anchored to. It is read inside a filter on the reported day's own index,
 so widening the usage around it left it exactly where it was.
+
+## Which field `NAS_IP_ADDRESS` is read from
+
+The dump asks the reported day's index, once per run, rather than assuming. It has to, because
+assuming wrong is invisible: **a terms aggregation on a field the mapping does not have answers
+with no terms and no error**, which the dump writes out as an empty `NAS_IP_ADDRESS` for every
+user of a run that otherwise succeeds — next to a `UTLIZED_QUOTA` that is perfectly correct,
+because the usage join reads `userName.keyword` and the two ids under `sessionInstances`, all of
+which the mapping does have. That is what the column was doing.
+
+The two spellings are one mapping decision seen from either side:
+
+| cdr-service maps `nasIpAddress` as | the aggregatable field is |
+| --- | --- |
+| `text` (what a dynamic mapping produces) | `nasIpAddress.keyword` — the sub-field |
+| `keyword`, or `ip` — what a template written for an address does | `nasIpAddress` itself |
+
+`usage.nas-ip-field` names the one to try first, and the same name with `.keyword` taken off (or,
+for a name configured without it, added on) is tried next. A field capabilities call against the
+reported day's index — one request, shared by every shard of the run — says which of them that
+index can actually aggregate, and the log says which was taken:
+
+```
+NAS_IP_ADDRESS will be read from nasIpAddress: nasIpAddress.keyword is not an aggregatable field
+of radius-sessions-2026.09.14, which maps the address without the .keyword sub-field a text
+mapping would add
+```
+
+So the setting only needs overriding where cdr-service records the address under a different name
+altogether. Where neither spelling is there, the run says so and names which half is missing — the
+index or the field — because they need different fixes:
+
+```
+NAS_IP_ADDRESS will be empty for every user: none of [nasIpAddress.keyword, nasIpAddress] is an
+aggregatable field of radius-sessions-2026.09.14. No index of that name answered, so the reported
+day's sessions are not under it — check report.user-dump.usage.index and report.user-dump.timezone
+against the daily indices cdr-service writes
+```
+
+A cluster that will not answer the lookup at all does not fail the dump: the configured spelling
+is used, exactly as it was before the lookup existed, and the log says the column may be empty.
+
+Each shard then counts what it actually wrote, so the column can never go quiet again:
+
+```
+Shard [f .. s) wrote an empty NAS_IP_ADDRESS for 12 of 748210 user(s); the rest were anchored to
+a NAS the reported day's sessions name
+```
+
+A handful of users there is a subscriber base with quiet days in it. All of them is the field, the
+filter, or the day's index — and it is a separate count from the usage one above because the two
+columns fail apart: `NAS_IP_ADDRESS` is one day's, read through a filter and a field of its own,
+so it can be empty on every row of a run whose `UTLIZED_QUOTA` is right.
 
 The same figure, asked for by the same pair, is what the `BUCKET_INSTANCE` extract reports as
 `USAGE` — one row per bucket instance rather than one per user, so it asks for every bucket rather

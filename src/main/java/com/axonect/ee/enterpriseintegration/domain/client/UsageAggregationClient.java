@@ -8,8 +8,11 @@ import co.elastic.clients.elasticsearch._types.aggregations.CompositeAggregation
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeBucket;
 import co.elastic.clients.elasticsearch._types.aggregations.StringTermsAggregate;
 import co.elastic.clients.elasticsearch._types.aggregations.StringTermsBucket;
+import co.elastic.clients.elasticsearch.core.FieldCapsRequest;
+import co.elastic.clients.elasticsearch.core.FieldCapsResponse;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
+import co.elastic.clients.elasticsearch.core.field_caps.FieldCapability;
 import co.elastic.clients.json.JsonData;
 import com.axonect.ee.enterpriseintegration.application.config.UserDumpProperties;
 import com.axonect.ee.enterpriseintegration.domain.exception.ReportClientException;
@@ -29,6 +32,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Aggregates each user's CDR usage out of Elasticsearch, one username at a time.
@@ -60,6 +64,18 @@ import java.util.Set;
  * can name more than one NAS across a day, so it is read as a small terms aggregation and the
  * most-used address wins — doc values only, no fetch phase, which is what keeps 3 million users
  * affordable next to a {@code top_hits} per user.
+ *
+ * <p>Which field that terms aggregation names is asked of the cluster rather than assumed, because
+ * getting it wrong is invisible: a terms aggregation on a field the mapping does not have answers
+ * with no terms and no error, so the dump writes an empty NAS_IP_ADDRESS for every user and the
+ * run still looks like a success. The address is a sub-field under a {@code text} mapping and a
+ * field in its own right under a {@code keyword} or an {@code ip} one, and the two spell the
+ * aggregatable field differently — {@code nasIpAddress.keyword} against {@code nasIpAddress}. So
+ * the spelling is resolved once per run against the reported day's own index, with a field
+ * capabilities call, and the log says which one was taken or why the column will be empty. Nothing
+ * else in this join needs that: {@code userName.keyword} and the two ids under
+ * {@code sessionInstances} are proven by the usage figures themselves, which go wrong in a way
+ * that shows rather than blank.
  */
 @Component
 @Slf4j
@@ -78,8 +94,18 @@ public class UsageAggregationClient {
     /** Metadata field the NAS filter pins to the reported day's own index. */
     private static final String INDEX_FIELD = "_index";
 
+    /** Suffix that names the aggregatable sub-field of a {@code text} mapping. */
+    private static final String KEYWORD_SUFFIX = ".keyword";
+
     private final ObjectProvider<ElasticsearchClient> clientProvider;
     private final UserDumpProperties properties;
+
+    /**
+     * NAS field resolved per reported-day index, so the shards of one run resolve it once between
+     * them rather than once each. A run names a new index, so an entry is a run's worth of memory
+     * and never a stale answer for the day being reported on.
+     */
+    private final Map<String, String> resolvedNasIpFields = new ConcurrentHashMap<>();
 
     public UsageAggregationClient(ObjectProvider<ElasticsearchClient> clientProvider,
                                   UserDumpProperties properties) {
@@ -178,8 +204,131 @@ public class UsageAggregationClient {
         if (client == null) {
             throw new ReportClientException("Elasticsearch client is not configured for the usage lookup", null);
         }
-        return new CompositeUsageCursor(
-                client, indicesThroughToday(), reportedDayIndex, usernameFrom, usernameTo, usage);
+        // Only the dump fills NAS_IP_ADDRESS, so only the dump pays for resolving the field it is
+        // read from; the bucket extract asks for no such column and reaches here with no day.
+        String nasIpField = reportedDayIndex == null
+                ? null
+                : resolveNasIpField(client, reportedDayIndex, usage);
+
+        return new CompositeUsageCursor(client, indicesThroughToday(), reportedDayIndex, nasIpField,
+                usernameFrom, usernameTo, usage);
+    }
+
+    /**
+     * The field NAS_IP_ADDRESS is aggregated on, as the reported day's index actually maps it.
+     *
+     * <p>Configuration names the spelling to prefer; the cluster decides whether that spelling is
+     * there. Both outcomes are the same shape to a terms aggregation — no terms — so a field that
+     * is not in the mapping cannot be told from a user with no NAS by looking at the answer, and
+     * the whole column comes out empty without a single error. Asking first is one request per
+     * run against one index, and it turns that silence into a line in the log.
+     */
+    private String resolveNasIpField(ElasticsearchClient client, String reportedDayIndex,
+                                     UserDumpProperties.Usage usage) {
+        String configured = usage.getNasIpField();
+        if (configured == null || configured.isEmpty()) {
+            log.warn("report.user-dump.usage.nas-ip-field names no field, so NAS_IP_ADDRESS is "
+                    + "left empty and the aggregation behind it is left out of the request");
+            return null;
+        }
+        return resolvedNasIpFields.computeIfAbsent(reportedDayIndex + '\u0000' + configured,
+                key -> lookUpNasIpField(client, reportedDayIndex, configured));
+    }
+
+    /**
+     * Asks the reported day's index which of the candidate spellings it can aggregate, and takes
+     * the first it can.
+     *
+     * <p>A cluster that will not answer — the call is refused, the version does not carry the API,
+     * anything at all — leaves the configured spelling in place, which is exactly the behaviour
+     * this replaces: the aggregation is tried, and the column is empty if the guess was wrong.
+     * Nothing this method can run into is worth failing a 3 million row dump over, so it catches
+     * broadly on purpose; the other 38 columns do not depend on it. What is not left alone is the
+     * log. Every way this can end with an empty NAS_IP_ADDRESS says so here, naming the index it
+     * asked and the fields it asked for, because that column failing quietly is what this lookup
+     * exists to stop.
+     */
+    private String lookUpNasIpField(ElasticsearchClient client, String index, String configured) {
+        List<String> candidates = nasIpFieldCandidates(configured);
+        try {
+            FieldCapsResponse caps = client.fieldCaps(new FieldCapsRequest.Builder()
+                    .index(index)
+                    .fields(candidates)
+                    // The day's index can be absent — rolled away, or a dump run before
+                    // cdr-service wrote anything that day — and that is a log line, not a failure
+                    // of the run: every other column of the dump is still there to be written.
+                    .allowNoIndices(true)
+                    .ignoreUnavailable(true)
+                    .build());
+
+            for (String candidate : candidates) {
+                if (isAggregatable(caps, candidate)) {
+                    if (!candidate.equals(configured)) {
+                        log.info("NAS_IP_ADDRESS will be read from {}: {} is not an aggregatable "
+                                        + "field of {}, which maps the address without the {} "
+                                        + "sub-field a text mapping would add",
+                                candidate, configured, index, KEYWORD_SUFFIX);
+                    }
+                    return candidate;
+                }
+            }
+
+            log.error("NAS_IP_ADDRESS will be empty for every user: none of {} is an aggregatable "
+                            + "field of {}. {} — set report.user-dump.usage.nas-ip-field to the "
+                            + "field cdr-service records the NAS address under",
+                    candidates, index, whatAnswered(caps));
+
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not ask {} which field maps the NAS address; NAS_IP_ADDRESS will be "
+                            + "read from the configured {} and will be empty if that is not the "
+                            + "field the mapping carries", index, configured, e);
+        }
+        return configured;
+    }
+
+    /** Whether {@code field} is a field of the answered indices that a terms aggregation can read. */
+    private boolean isAggregatable(FieldCapsResponse caps, String field) {
+        Map<String, FieldCapability> byType = caps.fields().get(field);
+        if (byType == null) {
+            return false;
+        }
+        return byType.values().stream().anyMatch(FieldCapability::aggregatable);
+    }
+
+    /**
+     * Which of the two ways the lookup came back empty this was, so the log says whether the index
+     * or the field is the thing that is missing. They need different fixes and read alike in the
+     * file: an absent index is a naming or a timezone that does not match cdr-service's, while an
+     * index that answered with neither field is a mapping the configured field does not describe.
+     */
+    private String whatAnswered(FieldCapsResponse caps) {
+        return caps.indices().isEmpty()
+                ? "No index of that name answered, so the reported day's sessions are not under it"
+                        + " — check report.user-dump.usage.index and report.user-dump.timezone"
+                        + " against the daily indices cdr-service writes"
+                : "The index answered, so it holds the day's sessions under some other field";
+    }
+
+    /**
+     * The spellings of the NAS field worth trying, most preferred first: the configured one, then
+     * the same name with the {@code .keyword} sub-field added or taken away.
+     *
+     * <p>Those two are the same mapping decision seen from either side. cdr-service writing the
+     * address into a {@code text} field makes {@code nasIpAddress.keyword} the aggregatable one
+     * and {@code nasIpAddress} analysed and unaggregatable; mapping it as {@code keyword} or as
+     * {@code ip} — which is what a template written for an address does — makes
+     * {@code nasIpAddress} the aggregatable one and {@code nasIpAddress.keyword} nothing at all.
+     * A deployment that renames the field past either of those still overrides
+     * {@code nas-ip-field}, and its override is what is preferred here.
+     */
+    static List<String> nasIpFieldCandidates(String configured) {
+        if (configured == null || configured.isEmpty()) {
+            return List.of();
+        }
+        String sibling = configured.endsWith(KEYWORD_SUFFIX)
+                ? configured.substring(0, configured.length() - KEYWORD_SUFFIX.length())
+                : configured + KEYWORD_SUFFIX;
+        return sibling.isEmpty() ? List.of(configured) : List.of(configured, sibling);
     }
 
     /**
@@ -191,6 +340,8 @@ public class UsageAggregationClient {
         private final ElasticsearchClient client;
         private final List<String> indices;
         private final String reportedDayIndex;
+        /** Field the NAS terms aggregation names, as the reported day's index maps it. */
+        private final String nasIpField;
         private final String usernameFrom;
         private final String usernameTo;
         private final UserDumpProperties.Usage config;
@@ -200,11 +351,13 @@ public class UsageAggregationClient {
         private boolean exhausted;
 
         private CompositeUsageCursor(ElasticsearchClient client, List<String> indices,
-                                     String reportedDayIndex, String usernameFrom,
-                                     String usernameTo, UserDumpProperties.Usage config) {
+                                     String reportedDayIndex, String nasIpField,
+                                     String usernameFrom, String usernameTo,
+                                     UserDumpProperties.Usage config) {
             this.client = client;
             this.indices = indices;
             this.reportedDayIndex = reportedDayIndex;
+            this.nasIpField = nasIpField;
             this.usernameFrom = usernameFrom;
             this.usernameTo = usernameTo;
             this.config = config;
@@ -290,8 +443,9 @@ public class UsageAggregationClient {
             Map<String, Aggregation> aggregations = new HashMap<>(4);
             // Null means no column is being filled from it, which is the bucket extract: it has no
             // reported day and no NAS column, so the filter and the terms aggregation under it are
-            // left out of the request rather than run per user and dropped.
-            if (reportedDayIndex != null) {
+            // left out of the request rather than run per user and dropped. A dump that could not
+            // be told which field maps the address leaves them out for the same reason.
+            if (reportedDayIndex != null && nasIpField != null) {
                 aggregations.put(AGG_REPORTED_DAY, reportedDay());
             }
 
@@ -350,10 +504,16 @@ public class UsageAggregationClient {
          * the cluster still holds, today's sessions included. The address is a scalar on the
          * session document, not on an instance, so this sits beside the usage aggregation whether
          * or not the instances are nested.
+         *
+         * <p>The field it names is the one {@link #resolveNasIpField} found in that index's own
+         * mapping, not the configured spelling as it stands: the two differ by a
+         * {@code .keyword} sub-field that a {@code text} mapping has and a {@code keyword} or
+         * {@code ip} one does not, and aggregating the wrong one of them is what empties the
+         * column for every user without raising anything.
          */
         private Aggregation reportedDay() {
             Aggregation nasIp = new Aggregation.Builder()
-                    .terms(t -> t.field(config.getNasIpField()).size(config.getNasAddressesPerUser()))
+                    .terms(t -> t.field(nasIpField).size(config.getNasAddressesPerUser()))
                     .build();
 
             return new Aggregation.Builder()

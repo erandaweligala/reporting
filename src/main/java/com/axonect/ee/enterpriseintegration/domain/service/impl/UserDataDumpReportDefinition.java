@@ -273,14 +273,23 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     }
 
     /**
-     * Reports how many of the shard's rows got no usage out of Elasticsearch at all, and how many
-     * got a zero only because the bucket the database named is one the CDRs never mention.
+     * Reports how many of the shard's rows got no usage out of Elasticsearch at all, how many got
+     * a zero only because the bucket the database named is one the CDRs never mention, and how
+     * many were written with an empty NAS_IP_ADDRESS.
      *
-     * <p>Neither can be read off the file. An empty UTLIZED_QUOTA and a 0 both look like a
-     * subscriber who has not used their bundle, and the first of them is what a whole run of
+     * <p>None of the three can be read off the file. An empty UTLIZED_QUOTA and a 0 both look like
+     * a subscriber who has not used their bundle, and the first of them is what a whole run of
      * missing usage looked like while the scan stopped at the reported day. A shard that reports
-     * most of its users here is not reporting a quiet subscriber base — it is reporting that the
+     * most of its users there is not reporting a quiet subscriber base — it is reporting that the
      * usernames, or the bucket ids, are not the ones the CDR documents are keyed on.
+     *
+     * <p>The NAS count is the same kind of tell for the column beside it, and it is counted apart
+     * from the others because the two columns fail apart. NAS_IP_ADDRESS is one day's, read
+     * through a filter and a field of its own, so it can be empty on every row of a run whose
+     * UTLIZED_QUOTA is perfectly good — which is what a mapping that spells the address field
+     * differently produces, and what went unnoticed until a run said so here. A handful of users
+     * is a subscriber base with quiet days in it; all of them is the field, the filter, or the
+     * day's index.
      */
     private void logUsageCoverage(UsernameRange range, MacCollapsingWriter rows) {
         if (!properties.getUsage().isEnabled() || rows.written() == 0) {
@@ -291,6 +300,10 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
                         + "quota bucket their CDRs never name, whose UTLIZED_QUOTA is 0",
                 range.fromInclusive(), range.toExclusive(),
                 rows.withoutCdrUsage(), rows.written(), rows.withUnknownQuotaBucket());
+        log.info("Shard [{} .. {}) wrote an empty NAS_IP_ADDRESS for {} of {} user(s); the rest "
+                        + "were anchored to a NAS the reported day's sessions name",
+                range.fromInclusive(), range.toExclusive(),
+                rows.withoutNasAddress(), rows.written());
     }
 
     /**
@@ -368,6 +381,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         private long scopedToBundle;
         private long withoutCdrUsage;
         private long withUnknownQuotaBucket;
+        private long withoutNasAddress;
 
         private MacCollapsingWriter(UserUsageCursor usage, StreamingCsvWriter writer,
                                     boolean scopeToService) {
@@ -427,6 +441,15 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         }
 
         /**
+         * Users written with an empty NAS_IP_ADDRESS: the aggregation returned no address for
+         * them, whether because they held no session on the reported day or because nothing the
+         * dump asked Elasticsearch for could have answered with one.
+         */
+        long withoutNasAddress() {
+            return withoutNasAddress;
+        }
+
+        /**
          * Lays one result set row out over the CSV columns, splicing the two Elasticsearch-filled
          * columns into the positions the database has no column for. Everything before
          * NAS_IP_ADDRESS lands on its own position; everything between it and UTLIZED_QUOTA is one
@@ -451,7 +474,11 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             // address, so probing on the first of them is probing once.
             UserUsageCursor.UserUsage cdr = usage.forUser(user);
 
-            row[NAS_IP_ADDRESS_POSITION] = cdr == null ? null : cdr.nasIpAddress();
+            String nasIpAddress = cdr == null ? null : cdr.nasIpAddress();
+            if (nasIpAddress == null || nasIpAddress.isEmpty()) {
+                withoutNasAddress++;
+            }
+            row[NAS_IP_ADDRESS_POSITION] = nasIpAddress;
             row[UTILIZED_QUOTA_POSITION] =
                     cdr == null ? null : Long.toString(cdr.usageOn(serviceId, quotaBucketId));
             row[UTILIZED_QUOTA_POSITION + 1] = resultSet.getString(UserDumpSql.COL_BUNDLE_DEACTIVATION_DATE);
