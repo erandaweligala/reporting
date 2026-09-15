@@ -160,11 +160,22 @@ public class UserDumpProperties {
         private int nasAddressesPerUser = 5;
 
         /**
-         * Field NAS_IP_ADDRESS is aggregated on. The usage join has always assumed
-         * {@code userName.keyword} and is proven against the live indices; this field is newer, and
-         * an aggregation on a field the mapping does not have returns no terms rather than an
-         * error — an empty column, not a failed run. Overriding it is the fix if cdr-service's
-         * template ever maps the address as a plain keyword instead of a sub-field.
+         * Field NAS_IP_ADDRESS is aggregated on, and the first spelling of it the dump tries.
+         *
+         * <p>It is a preference rather than an assertion. An aggregation on a field the mapping
+         * does not have returns no terms rather than an error — an empty column, not a failed run
+         * — so the dump asks the reported day's index which spelling it can actually aggregate
+         * before it asks for the addresses. This one is tried first; if the mapping does not have
+         * it, the same name with {@code .keyword} taken off (or, for a name without it, added on)
+         * is tried next, which is the same mapping decision seen from the other side: the address
+         * is a sub-field under a {@code text} mapping and a field of its own under a
+         * {@code keyword} or an {@code ip} one. The log says which was taken.
+         *
+         * <p>So this needs overriding only for a deployment whose cdr-service records the address
+         * under a different name altogether. Both spellings of this name are covered without it,
+         * which is what the column was missing: it came out empty for every user, on runs whose
+         * UTLIZED_QUOTA — read from {@code userName.keyword} and the ids under
+         * {@code sessionInstances}, all proven against the live indices — was correct.
          */
         private String nasIpField = "nasIpAddress.keyword";
 

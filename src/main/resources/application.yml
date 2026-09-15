@@ -261,6 +261,13 @@ report:
       # BUCKET_INSTANCE.USAGE is what notices, since it asks once per bucket instance.
       services-per-user: 10
       nas-addresses-per-user: 5  # distinct NAS addresses weighed before NAS_IP_ADDRESS is picked
+      # First spelling of the NAS field tried, not an assertion about the mapping: a terms
+      # aggregation on a field that is not mapped returns no terms rather than an error, so the
+      # dump asks the reported day's index which spelling it can aggregate before asking for the
+      # addresses. If this one is not it, the same name with .keyword taken off is tried — the
+      # address is a sub-field under a text mapping and a field of its own under a keyword or ip
+      # one — and the log says which was taken. Override it only where cdr-service records the
+      # address under some other name entirely.
       nas-ip-field: nasIpAddress.keyword
       # sessionInstances is mapped as a nested type. False says it is not, and Elasticsearch then
       # flattens it: usage cannot be attributed to one bucket at all, so UTLIZED_QUOTA and
