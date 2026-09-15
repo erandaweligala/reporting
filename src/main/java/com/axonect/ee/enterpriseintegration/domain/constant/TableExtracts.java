@@ -47,11 +47,46 @@ public final class TableExtracts {
      */
     public static final String BUCKET_TYPE_COLUMN = "BUCKET_TYPE";
     /**
-     * Helper column of {@link #BUCKET_INSTANCE_FROM_CDR}: the username that service is held by,
+     * Helper column of {@link #bucketInstanceFromCdr}: the username that service is held by,
      * which is what the CDR documents are grouped under. It is read from the row and not written
      * to the file — BUCKET_INSTANCE carries no username column and must not start carrying one.
      */
     public static final String USER_NAME_HELPER = "USER_NAME";
+
+    /**
+     * The bucket extract's rule column, which reports the bandwidth bucket of the row's own bundle
+     * — the figure the user data dump reports as PLAN_BANDWIDTH — rather than BUCKET_INSTANCE.RULE.
+     */
+    public static final String RULE_COLUMN = "RULE";
+
+    /** The name the dump gives that figure, kept here so the two statements read alike. */
+    private static final String PLAN_BANDWIDTH = "PLAN_BANDWIDTH";
+
+    /**
+     * The bandwidth bucket of each service, pre-aggregated and LEFT joined so that RULE can report
+     * it. It is the dump's {@code bkt} inline view with the one column this extract needs:
+     *
+     * <ul>
+     *   <li><b>The same definition, so the two files cannot disagree.</b> The dump reads
+     *       PLAN_BANDWIDTH as {@code MAX(CASE WHEN BUCKET_TYPE = ? THEN BUCKET_ID END)} over a
+     *       service's buckets; filtering the rows first and taking {@code MAX(BUCKET_ID)} of what
+     *       is left is the same value, and the LEFT join is what makes a service with no bandwidth
+     *       bucket empty here exactly as the CASE makes it empty there.</li>
+     *   <li><b>Bound, and compared the way the dump compares it.</b> The bucket type is
+     *       {@code report.user-dump.bandwidth-bucket-type}, bound rather than written into the SQL,
+     *       and matched exactly — case included — because the dump matches it in the database. A
+     *       forgiving comparison here would report a value in RULE for a deployment whose rows
+     *       spell the type differently while PLAN_BANDWIDTH stayed empty beside it, which is the
+     *       one thing these two columns must not do.</li>
+     *   <li><b>Pre-aggregated rather than correlated.</b> One pass over the bandwidth buckets and a
+     *       hash join, not a lookup per row: this runs once for every bucket instance in the
+     *       database. It is the one aggregate in an extract, and it buys the whole column.</li>
+     * </ul>
+     */
+    private static final String PLAN_BANDWIDTH_JOIN =
+            " LEFT JOIN (SELECT SERVICE_ID, MAX(BUCKET_ID) AS " + PLAN_BANDWIDTH
+                    + " FROM BUCKET_INSTANCE WHERE BUCKET_TYPE = ? GROUP BY SERVICE_ID) bw"
+                    + " ON bw.SERVICE_ID = b.SERVICE_ID";
 
     /**
      * The service base: one row per SERVICE_INSTANCE.
@@ -65,8 +100,8 @@ public final class TableExtracts {
      *       mapping is done in SQL rather than left for the consumer to guess at.</li>
      *   <li>{@code GROUP_ID} is not a SERVICE_INSTANCE column at all. It is the subscriber's group
      *       on AAA_USER — the same column the user data dump reports under that name — which is
-     *       why this is the one extract with a join. SERVICE_INSTANCE.IS_GROUP is a flag, not an
-     *       id, and is deliberately not what is reported here.</li>
+     *       why this extract has a join at all. SERVICE_INSTANCE.IS_GROUP is a flag, not an id,
+     *       and is deliberately not what is reported here.</li>
      * </ul>
      *
      * <p>The join is a LEFT join so a service whose username no longer resolves to a user is still
@@ -124,17 +159,28 @@ public final class TableExtracts {
      *
      * <p>Two departures from the DDL, both from the sample: {@code USAGE} is reported before
      * {@code UPDATED_AT} rather than after it, and {@code IS_UNLIMITED} is not part of the extract
-     * at all even though the table carries it.
+     * at all even though the table carries it. A third is not from the sample but from the
+     * consuming system: {@code RULE} reports the bundle's bandwidth bucket rather than the table's
+     * RULE column — see {@link #PLAN_BANDWIDTH_JOIN}.
      *
      * <p>This is the variant that reports the table's own USAGE column. What a deployment runs by
-     * default is {@link #BUCKET_INSTANCE_FROM_CDR}, which reports the same figure the user data
-     * dump reports as UTLIZED_QUOTA; this one is what it falls back to — see
+     * default is {@link #bucketInstanceFromCdr}, which reports the same figure the user data dump
+     * reports as UTLIZED_QUOTA; this one is what it falls back to — see
      * {@code report.table-extract.usage-from-cdr}.
+     *
+     * @param bandwidthBucketType BUCKET_INSTANCE.BUCKET_TYPE holding the plan bandwidth, the same
+     *                            {@code report.user-dump.bandwidth-bucket-type} the dump reads
+     *                            PLAN_BANDWIDTH under
      */
-    public static final Spec BUCKET_INSTANCE = new Spec(
-            BUCKET_INSTANCE_TYPE,
-            "BUCKET_INSTANCE b",
-            bucketInstanceColumns(Column.plain(USAGE_COLUMN, "b.USAGE")));
+    public static Spec bucketInstance(String bandwidthBucketType) {
+        return new Spec(
+                BUCKET_INSTANCE_TYPE,
+                "BUCKET_INSTANCE b" + PLAN_BANDWIDTH_JOIN,
+                bucketInstanceColumns(Column.plain(USAGE_COLUMN, "b.USAGE")),
+                List.of(),
+                null,
+                bandwidthParams(bandwidthBucketType));
+    }
 
     /**
      * The same extract with {@code USAGE} read from the CDR session documents in Elasticsearch
@@ -167,25 +213,47 @@ public final class TableExtracts {
      *       is happening anyway.</li>
      * </ul>
      */
-    public static final Spec BUCKET_INSTANCE_FROM_CDR = new Spec(
-            BUCKET_INSTANCE_TYPE,
-            "BUCKET_INSTANCE b LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID",
-            bucketInstanceColumns(Column.spliced(USAGE_COLUMN)),
-            List.of(Column.plain(USER_NAME_HELPER, "si.USERNAME")),
-            "si.USERNAME NULLS LAST, b.EXPIRATION DESC NULLS LAST, b.ID DESC");
+    public static Spec bucketInstanceFromCdr(String bandwidthBucketType) {
+        return new Spec(
+                BUCKET_INSTANCE_TYPE,
+                "BUCKET_INSTANCE b LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID"
+                        + PLAN_BANDWIDTH_JOIN,
+                bucketInstanceColumns(Column.spliced(USAGE_COLUMN)),
+                List.of(Column.plain(USER_NAME_HELPER, "si.USERNAME")),
+                "si.USERNAME NULLS LAST, b.EXPIRATION DESC NULLS LAST, b.ID DESC",
+                bandwidthParams(bandwidthBucketType));
+    }
 
     /**
      * Every extract, in the order they are registered — with BUCKET_INSTANCE as it reads the
      * table's own USAGE column. Which of the two bucket specs a deployment actually runs is
      * {@code TableExtractReportsConfig}'s to decide; both carry the same header, which is the part
      * the consuming system holds anyone to.
+     *
+     * @param bandwidthBucketType the bucket type BUCKET_INSTANCE.RULE is reported from, as for
+     *                            {@link #bucketInstance(String)}
      */
-    public static final List<Spec> ALL = List.of(MAC_SERVICE_TABLE, PLAN_TO_BUCKET, BUCKET_INSTANCE);
+    public static List<Spec> all(String bandwidthBucketType) {
+        return List.of(MAC_SERVICE_TABLE, PLAN_TO_BUCKET, bucketInstance(bandwidthBucketType));
+    }
+
+    /**
+     * What the bandwidth join binds.
+     *
+     * <p>A setting that is absent binds an empty string rather than a null: it matches no bucket
+     * type, so RULE comes out empty for every row — which is what the dump reports as
+     * PLAN_BANDWIDTH under the same configuration — and the driver is never handed an untyped null
+     * to guess a type for.
+     */
+    private static List<Object> bandwidthParams(String bandwidthBucketType) {
+        return List.of(bandwidthBucketType == null ? "" : bandwidthBucketType);
+    }
 
     /**
      * The bucket extract's columns, in the sample's order, around whichever {@code USAGE} column
      * the run reports. Shared by both specs so that the header — the contract — cannot drift
-     * between them.
+     * between them, and so that {@code RULE} is the bundle's bandwidth bucket in both: where USAGE
+     * is read from is a deployment's business, and neither variant may write a different file.
      */
     private static List<Column> bucketInstanceColumns(Column usage) {
         return List.of(
@@ -201,7 +269,7 @@ public final class TableExtracts {
                 Column.plain("INITIAL_BALANCE", "b.INITIAL_BALANCE"),
                 Column.plain("MAX_CARRY_FORWARD", "b.MAX_CARRY_FORWARD"),
                 Column.plain("PRIORITY", "b.PRIORITY"),
-                Column.plain("RULE", "b.RULE"),
+                Column.plain(RULE_COLUMN, "bw." + PLAN_BANDWIDTH),
                 Column.plain(SERVICE_ID_COLUMN, "b.SERVICE_ID"),
                 Column.plain("TIME_WINDOW", "b.TIME_WINDOW"),
                 Column.plain("TOTAL_CARRY_FORWARD", "b.TOTAL_CARRY_FORWARD"),

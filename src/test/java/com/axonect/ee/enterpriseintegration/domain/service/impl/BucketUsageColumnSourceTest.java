@@ -29,7 +29,7 @@ import static org.mockito.Mockito.when;
  */
 class BucketUsageColumnSourceTest {
 
-    private static final Spec SPEC = TableExtracts.BUCKET_INSTANCE_FROM_CDR;
+    private static final Spec SPEC = TableExtracts.bucketInstanceFromCdr("BANDWIDTH");
     private static final int USER_NAME_COLUMN = SPEC.resultIndex(TableExtracts.USER_NAME_HELPER);
     private static final int USAGE = SPEC.csvIndex(TableExtracts.USAGE_COLUMN);
     private static final int SERVICE_ID = SPEC.csvIndex(TableExtracts.SERVICE_ID_COLUMN);

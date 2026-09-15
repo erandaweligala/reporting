@@ -33,7 +33,7 @@ class ReportDefinitionInitializerTest {
         error = mock(ErrorLogReportDefinition.class);
         audit = mock(AuditLogReportDefinition.class);
         userDataDump = mock(UserDataDumpReportDefinition.class);
-        tableExtracts = TableExtracts.ALL.stream()
+        tableExtracts = TableExtracts.all("BANDWIDTH").stream()
                 .map(spec -> new TableExtractReportDefinition(spec, null, new TableExtractProperties()))
                 .toList();
 

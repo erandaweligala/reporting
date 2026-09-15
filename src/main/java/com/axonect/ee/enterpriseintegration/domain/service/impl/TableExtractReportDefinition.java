@@ -37,8 +37,11 @@ import java.util.function.Supplier;
  *       extract cannot be the reason the service pauses for a full collection.</li>
  *   <li><b>One sequential pass over the table.</b> The statement has no shard predicate and, unless
  *       something outside the database is being read in step with it, no ORDER BY — so Oracle reads
- *       the table the cheapest way it can and reads it exactly once. See {@link TableExtractSql}
- *       for why parallel shards would cost the database more and finish no sooner.</li>
+ *       the table the cheapest way it can. The rows the file is made of are read exactly once; the
+ *       one extract that reads anything twice is the bucket extract, whose RULE column is an
+ *       aggregate over the same table, pre-aggregated in the from clause rather than looked up per
+ *       row. See {@link TableExtractSql} for why parallel shards would cost the database more and
+ *       finish no sooner.</li>
  *   <li><b>Text conversion in the database.</b> Every column comes back with {@code getString}, so
  *       no {@code Timestamp} or {@code BigDecimal} is allocated per column per row.</li>
  * </ul>
