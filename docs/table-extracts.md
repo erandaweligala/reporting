@@ -9,7 +9,7 @@ run of that size is kept off the critical path of the rest of the service.
 | --- | --- | --- |
 | `MAC_SERVICE_TABLE` | `SERVICE_INSTANCE`, left-joined to `AAA_USER` for `GROUP_ID` | one per service, ~3 M |
 | `PLAN_TO_BUCKET` | `PLAN_TO_BUCKET` | one per plan per bucket, thousands |
-| `BUCKET_INSTANCE` | `BUCKET_INSTANCE`, with `USAGE` read from the CDR documents in Elasticsearch | one per bucket per service, > 3 M |
+| `BUCKET_INSTANCE` | `BUCKET_INSTANCE`, with `USAGE` read from the CDR documents in Elasticsearch and `RULE` from the bundle's bandwidth bucket | one per bucket per service, > 3 M |
 
 `SERVICE_ID` in the first is `SERVICE_INSTANCE.ID`, which is what `BUCKET_INSTANCE.SERVICE_ID`
 points at — so the three files join back together in the consuming system the way the tables do
@@ -27,8 +27,8 @@ differ from it in ways that must be preserved, so every header line is asserted 
   done in SQL (`DECODE(si.RECURRING_FLAG, 1, 'Yes', 'No')`) rather than left for the consumer to
   guess at.
 - **`GROUP_ID`** is not a `SERVICE_INSTANCE` column. It is the subscriber's group on `AAA_USER` —
-  the same column the user data dump reports under that name — which is why this is the one extract
-  with a join. `SERVICE_INSTANCE.IS_GROUP` is a flag, not an id, and is deliberately not what is
+  the same column the user data dump reports under that name — which is why this extract has a join
+  at all. `SERVICE_INSTANCE.IS_GROUP` is a flag, not an id, and is deliberately not what is
   reported. **Worth confirming against the schema**, since the sample shows only the value `1`,
   which both columns could produce.
 - **`BUCKET_INSTANCE`** reports `USAGE` *before* `UPDATED_AT`, where the DDL orders them the other
@@ -36,6 +36,9 @@ differ from it in ways that must be preserved, so every header line is asserted 
 - **`BUCKET_INSTANCE.USAGE`** is not the table's `USAGE` column. It is the total the CDR session
   documents record against that bucket — the figure the user data dump reports as `UTLIZED_QUOTA`,
   for the bucket each row is. See [What `USAGE` is](#what-bucket_instanceusage-is) below.
+- **`BUCKET_INSTANCE.RULE`** is not the table's `RULE` column either. It is the id of the bandwidth
+  bucket held by the bundle the row belongs to — the figure the user data dump reports as
+  `PLAN_BANDWIDTH`. See [What `RULE` is](#what-bucket_instancerule-is) below.
 
 Every date and timestamp column is reported as `yyyy-MM-dd HH:mm:ss`, and is displayed that way by
 the spreadsheet an extract is checked in — see [Dates](#dates) below for both halves of that. The
@@ -47,6 +50,45 @@ Each column is still CAST to `TIMESTAMP` before `TO_CHAR` sees it, even though t
 longer carries an `FF` element: `TO_CHAR` of a `DATE` with `FF` raises ORA-01821, so the cast is
 what keeps the statement independent both of which of the two a given column is and of whether a
 deployment's `date-format` asks for a fraction.
+
+## What `BUCKET_INSTANCE.RULE` is
+
+The bandwidth bucket of the bundle each row belongs to: `BUCKET_INSTANCE.BUCKET_ID` of that
+service's bucket of type `report.user-dump.bandwidth-bucket-type`, which is exactly what the user
+data dump reports for that bundle as `PLAN_BANDWIDTH`. The table's own `RULE` column is not
+reported.
+
+It is the same figure asked for the same way, so it is defined once. The dump collapses
+`BUCKET_INSTANCE` to one row per service and pivots the bandwidth bucket into a column
+(`MAX(CASE WHEN BUCKET_TYPE = ? THEN BUCKET_ID END)`, grouped by `SERVICE_ID`); the extract joins
+that same aggregate, filtered to the bandwidth type first, which is the same value:
+
+```sql
+BUCKET_INSTANCE b
+LEFT JOIN (SELECT SERVICE_ID, MAX(BUCKET_ID) AS PLAN_BANDWIDTH
+             FROM BUCKET_INSTANCE
+            WHERE BUCKET_TYPE = ?
+         GROUP BY SERVICE_ID) bw ON bw.SERVICE_ID = b.SERVICE_ID
+```
+
+Three things follow from that shape:
+
+- **A bucket whose bundle holds no bandwidth bucket still gets a row**, with an empty `RULE` — the
+  LEFT join is what makes it empty here exactly as the `CASE` makes `PLAN_BANDWIDTH` empty there.
+  An empty column in both files is one fact about the bundle, not a row this extract dropped.
+- **The bucket type is matched exactly, case included**, because the dump matches it in the
+  database. A forgiving comparison would report a value here while `PLAN_BANDWIDTH` stayed empty
+  beside it for the same bundle, which is the one thing these two columns must not do. A deployment
+  whose rows spell the type differently sees both columns empty, and the fix is the setting.
+- **The figure is per bundle, not per subscriber.** A row's `RULE` is its own `SERVICE_ID`'s
+  bandwidth bucket, so a subscriber's older cycles report the bandwidth those cycles carried. The
+  dump reports one bundle per user — the one active on the reported day — and for that bundle's
+  buckets the two files carry the same value.
+
+The cost is one aggregate in a set of extracts that otherwise have none: a pass over the bandwidth
+buckets, hash-joined into the scan. It is paid once per run rather than per row — a correlated
+sub-select would be one index lookup for every bucket instance in the database, and a window
+function would sort every column of every row in temp space to compute one of them.
 
 ## What `BUCKET_INSTANCE.USAGE` is
 
@@ -228,6 +270,11 @@ consuming system loads the file into a table, where row order means nothing, whi
 over a few million rows would either sort in temp space or walk the primary key index and pick rows
 up a block at a time — random I/O where the scan was sequential.
 
+The bucket extract is the one that pays for more, and only for the two columns that are not columns
+of the row: an `ORDER BY` because `USAGE` is read in step with the table, and a `GROUP BY` because
+`RULE` is an aggregate over it. Both are paid once, in the from clause — see
+[What `RULE` is](#what-bucket_instancerule-is).
+
 The one extract that does carry an ordering is `BUCKET_INSTANCE` reading its `USAGE` from the CDR
 documents, and it carries one for the only reason that pays for itself: something outside the
 database is being read in step with the scan, and an ordering is what keeps that read from
@@ -347,12 +394,14 @@ they differ only in what they select, and the defaults that suit the largest are
 smallest, since a buffer is allocated per running extract and not per row.
 
 `usage-from-cdr` decides where `BUCKET_INSTANCE.USAGE` is read from and so what it means; the
-figure itself is configured once, with the dump's, under `report.user-dump.usage`:
+figure itself is configured once, with the dump's, under `report.user-dump.usage`. `RULE` has no
+setting of this extract's own at all — it is the dump's bucket type and nothing else:
 
 ```yaml
 report:
   user-dump:
     timezone: "${TZ:UTC}"        # the zone the CDR daily indices are named in
+    bandwidth-bucket-type: BANDWIDTH   # the bucket BUCKET_INSTANCE.RULE and PLAN_BANDWIDTH report
     usage:
       enabled: true              # off leaves the extract reporting the table's own counter
       index: radius-sessions     # cdr-service `sessions-data`
@@ -367,7 +416,10 @@ report:
 
 Two reports read that figure and there is one definition of it, so a change here moves
 `UTLIZED_QUOTA` and `BUCKET_INSTANCE.USAGE` together — which is the point: they are the same number
-asked for by different rows. `docs/user-data-dump.md` documents each setting in full.
+asked for by different rows. The same holds for `bandwidth-bucket-type`, which moves
+`PLAN_BANDWIDTH` and `BUCKET_INSTANCE.RULE` together; a blank setting matches no bucket type and
+leaves both columns empty rather than one of them. `docs/user-data-dump.md` documents each setting
+in full.
 
 ## Operating notes
 
@@ -392,7 +444,16 @@ asked for by different rows. `docs/user-data-dump.md` documents each setting in 
   lookup per row. The bucket extract reading CDR usage is the exception —
   `SERVICE_INSTANCE(USERNAME)` and `BUCKET_INSTANCE(SERVICE_ID)` are what can give Oracle an
   ordered plan for it instead of a sort of every bucket instance in temp space. Both already exist
-  for the user data dump.
+  for the user data dump. The bandwidth bucket behind `RULE` is read through the same
+  `BUCKET_INSTANCE(SERVICE_ID)`; an index on `BUCKET_TYPE` is worth having where bandwidth buckets
+  are a small share of the table, since it is the only predicate that side of the join has.
+- **The bandwidth join can cost the ordered plan.** A hash join does not preserve an ordering, so on
+  the CDR variant the optimizer may now sort for the `ORDER BY` where it used to walk
+  `SERVICE_INSTANCE(USERNAME)` and nested-loop into `BUCKET_INSTANCE(SERVICE_ID)`. Nothing about the
+  merge with Elasticsearch changes — the rows still arrive in username order — but the temp space
+  note below applies to more runs than it did. Oracle's own answer, where it takes it, is to push
+  the join predicate into the inline view and read one service's bandwidth bucket at a time, which
+  keeps the ordered plan.
 - **Temp space, for that extract only.** If the optimizer does choose the sort, it sorts a few
   million rows; a `TEMP` tablespace sized for the rest of this service's work is not automatically
   sized for that. `usage-from-cdr: false` is the setting that takes the ordering away again.

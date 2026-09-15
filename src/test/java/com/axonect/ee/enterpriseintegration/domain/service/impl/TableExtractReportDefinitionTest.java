@@ -75,7 +75,7 @@ class TableExtractReportDefinitionTest {
         assertEquals("SAMPLE", definition.reportType());
         assertEquals("MAC_SERVICE_TABLE", extract(TableExtracts.MAC_SERVICE_TABLE).reportType());
         assertEquals("PLAN_TO_BUCKET", extract(TableExtracts.PLAN_TO_BUCKET).reportType());
-        assertEquals("BUCKET_INSTANCE", extract(TableExtracts.BUCKET_INSTANCE).reportType());
+        assertEquals("BUCKET_INSTANCE", extract(TableExtracts.bucketInstance("BANDWIDTH")).reportType());
     }
 
     @Test
@@ -153,7 +153,7 @@ class TableExtractReportDefinitionTest {
         // The flags come from the spec, so this is the whole contract for the shipped extracts:
         // Column.at is rendered with TO_CHAR by the statement and written as ="..." by the writer,
         // Column.plain is neither.
-        for (Spec spec : TableExtracts.ALL) {
+        for (Spec spec : TableExtracts.all("BANDWIDTH")) {
             String[] dbRow = new String[spec.columns().size()];
             Arrays.fill(dbRow, "2026-08-18 14:31:23");
 
@@ -290,7 +290,7 @@ class TableExtractReportDefinitionTest {
         // session that defaulted to a linguistic sort would mismatch usernames silently, so this
         // is the one extract that pays for the extra round trip.
         TableExtractReportDefinition extract = new TableExtractReportDefinition(
-                TableExtracts.BUCKET_INSTANCE_FROM_CDR, rowReader, properties);
+                TableExtracts.bucketInstanceFromCdr("BANDWIDTH"), rowReader, properties);
         when(rowReader.streamInBinaryOrder(any(), anyInt(), anyInt(), any())).thenReturn(0L);
 
         Path output = tempDir.resolve("ordered.csv");

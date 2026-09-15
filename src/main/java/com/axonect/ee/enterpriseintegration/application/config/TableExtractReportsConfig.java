@@ -44,6 +44,10 @@ public class TableExtractReportsConfig {
      * while the other is the single unordered scan the other two extracts are. That is why the two
      * are separate specs rather than one spec and a flag, and why the choice is made once here
      * rather than per run.
+     *
+     * <p>Both are built around the same bucket type for RULE, which is the one the user data dump
+     * reads PLAN_BANDWIDTH under: the column reports the same figure whichever variant runs, since
+     * where USAGE comes from is not something the consuming system can see in the file.
      */
     @Bean
     public TableExtractReportDefinition bucketInstanceReportDefinition(
@@ -52,11 +56,14 @@ public class TableExtractReportsConfig {
             UserDumpProperties usageProperties,
             UsageAggregationClient usageAggregationClient) {
 
+        String bandwidthBucketType = ruleFromPlanBandwidth(usageProperties);
+
         if (!usageFromCdr(properties, usageProperties)) {
-            return new TableExtractReportDefinition(TableExtracts.BUCKET_INSTANCE, rowReader, properties);
+            return new TableExtractReportDefinition(
+                    TableExtracts.bucketInstance(bandwidthBucketType), rowReader, properties);
         }
 
-        Spec spec = TableExtracts.BUCKET_INSTANCE_FROM_CDR;
+        Spec spec = TableExtracts.bucketInstanceFromCdr(bandwidthBucketType);
         boolean scopeToService = usageProperties.getUsage().isScopeToService();
         String quotaBucketType = usageProperties.getQuotaBucketType();
 
@@ -66,6 +73,26 @@ public class TableExtractReportsConfig {
                 () -> new BucketUsageColumnSource(
                         spec, usageAggregationClient.openBucketTotals(null, null), scopeToService,
                         quotaBucketType));
+    }
+
+    /**
+     * The bucket type BUCKET_INSTANCE.RULE is reported from, and a line saying so.
+     *
+     * <p>RULE is the id of the bandwidth bucket held by the bundle each row belongs to — what the
+     * user data dump reports for that bundle as PLAN_BANDWIDTH — rather than the table's own RULE
+     * column. Which bucket type that is comes from the dump's own setting, so the two reports
+     * cannot be pointed at different types, and an empty setting leaves both columns empty rather
+     * than one of them.
+     *
+     * <p>Like USAGE, nothing in the file says where the column came from, so the run says it here.
+     */
+    private String ruleFromPlanBandwidth(UserDumpProperties dump) {
+        String bandwidthBucketType = dump.getBandwidthBucketType();
+        log.info("BUCKET_INSTANCE.RULE reports the {} bucket of the bundle each row belongs to — "
+                        + "the figure USER_DATA_DUMP reports as PLAN_BANDWIDTH — and not the "
+                        + "table's own RULE column",
+                bandwidthBucketType);
+        return bandwidthBucketType;
     }
 
     /**

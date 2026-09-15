@@ -11,7 +11,7 @@ that make it survive that row count, and the settings an operator needs.
 | `USER_ID`, and every column not listed below | `AAA_USER` |
 | `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, one cursor row each, comma-joined per user as the rows are read (see below) |
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
-| `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` |
+| `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` — `PLAN_BANDWIDTH` is the `BUCKET_ID` of the bundle's bandwidth bucket, the figure the bucket extract reports as `RULE` (`docs/table-extracts.md`) |
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
 | `NOTIFICATION_TEMPLATES` | `AAA_USER.TEMPLATE_ID` — there is no column of that name either |
 | `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
@@ -335,7 +335,7 @@ report:
     csv-buffer-bytes: 1048576
     date-format: "YYYY-MM-DD HH24:MI:SS"
     excel-safe-timestamps: true  # write the date columns as ="..." so Excel displays them
-    bandwidth-bucket-type: BANDWIDTH
+    bandwidth-bucket-type: BANDWIDTH   # also what BUCKET_INSTANCE.RULE reports
     quota-bucket-type: DATA
     usage:
       enabled: true

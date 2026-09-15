@@ -16,6 +16,13 @@ class TableExtractSqlTest {
 
     private static final String DATE_FORMAT = "YYYY-MM-DD HH24:MI:SS.FF3";
 
+    /** The bucket type the deployment's dump reads PLAN_BANDWIDTH — and so RULE — under. */
+    private static final String BANDWIDTH_TYPE = "BANDWIDTH";
+
+    private static final Spec BUCKET_INSTANCE = TableExtracts.bucketInstance(BANDWIDTH_TYPE);
+    private static final Spec BUCKET_INSTANCE_FROM_CDR =
+            TableExtracts.bucketInstanceFromCdr(BANDWIDTH_TYPE);
+
     private static final Spec SPEC = new Spec("SAMPLE", "SAMPLE_TABLE t", List.of(
             Column.plain("ID", "t.ID"),
             Column.at("CREATED_AT", "t.CREATED_AT")));
@@ -37,9 +44,28 @@ class TableExtractSqlTest {
     }
 
     @Test
-    void carriesNoParametersBecauseAnExtractHasNothingToBind() {
+    void bindsNothingForAnExtractWhoseSpecNamesNoValueOfItsOwn() {
+        // An extract has no filters and takes nothing from a request, so a statement binds only
+        // what its spec carries — configuration naming a value, and nothing else.
         assertEquals(List.of(), TableExtractSql.build(SPEC, DATE_FORMAT).params());
         assertFalse(TableExtractSql.build(SPEC, DATE_FORMAT).sql().contains("?"));
+    }
+
+    @Test
+    void theBucketTypeBehindRuleIsBoundRatherThanWrittenIntoTheStatement() {
+        // It is a value, so it is bound: the date format model is concatenated only because a
+        // format model cannot be bound at all.
+        for (Spec spec : List.of(BUCKET_INSTANCE, BUCKET_INSTANCE_FROM_CDR)) {
+            SqlStatement statement = TableExtractSql.build(spec, DATE_FORMAT);
+
+            assertEquals(List.of(BANDWIDTH_TYPE), statement.params(), spec.reportType());
+            assertEquals(1, statement.sql().split("\\?", -1).length - 1,
+                    spec.reportType() + " binds one value, in the bandwidth join");
+            assertTrue(statement.sql().contains("bw.PLAN_BANDWIDTH,"),
+                    "RULE is selected from the joined bandwidth bucket");
+            assertFalse(statement.sql().contains("b.RULE"),
+                    "the table's own RULE column is not what the extract reports");
+        }
     }
 
     @Test
@@ -62,15 +88,35 @@ class TableExtractSqlTest {
     void readsTheTableInOnePassWithNothingAskedOfTheDatabaseBeyondTheProjection() {
         // The plan this statement is meant to get is a single sequential scan. An ORDER BY would
         // trade it for a sort or an index walk, and a shard predicate would trade one scan for
-        // several, so neither belongs in an extract that reads only the database. The one
-        // exception is the variant that reads the CDR usage in step with the table, which is the
-        // test above and is a spec of its own for exactly that reason.
-        String sql = TableExtractSql.build(TableExtracts.BUCKET_INSTANCE, DATE_FORMAT).sql();
+        // several, so neither belongs in an extract that reads only the database. Both exceptions
+        // are the bucket extract's and are asserted below: an ordering, because the CDR usage is
+        // read in step with the table, and an aggregate, because RULE is one.
+        String sql = TableExtractSql.build(TableExtracts.PLAN_TO_BUCKET, DATE_FORMAT).sql();
 
         assertFalse(sql.contains("ORDER BY"), "an extract must not pay for an ordering nobody reads");
         assertFalse(sql.contains("GROUP BY"));
         assertFalse(sql.contains("WHERE"));
         assertEquals(1, sql.split(" FROM ", -1).length - 1, "one table, read once");
+    }
+
+    @Test
+    void theOneAggregateAnExtractCarriesIsPreAggregatedInTheFromClause() {
+        // RULE is the bandwidth bucket of the row's bundle — a figure over the table rather than a
+        // column of the row — so it costs a GROUP BY. It is paid for once, in an inline view the
+        // optimizer can hash-join in a single pass, rather than per row in a correlated sub-select
+        // or per column of the projection in a window function.
+        String sql = TableExtractSql.build(BUCKET_INSTANCE, DATE_FORMAT).sql();
+
+        assertFalse(sql.contains("ORDER BY"),
+                "reporting RULE does not make the extract one that has to be ordered");
+        assertFalse(sql.contains("OVER ("), "no window function over a few million rows");
+        String selectList = sql.substring("SELECT ".length(), sql.indexOf(" FROM "));
+        assertFalse(selectList.contains("GROUP BY"), "the projection stays a projection");
+        assertEquals(1, sql.split("GROUP BY", -1).length - 1,
+                "one aggregate, and it is the bandwidth join's");
+        assertEquals(2, sql.split("SELECT", -1).length - 1,
+                "the extract's own projection and the pre-aggregated bandwidth bucket, and "
+                        + "nothing looked up per row");
     }
 
     @Test
@@ -85,17 +131,17 @@ class TableExtractSqlTest {
 
     @Test
     void theBucketExtractReadsNoUsageColumnOnceTheCdrDocumentsAreWhatFillIt() {
-        String sql = TableExtractSql.build(TableExtracts.BUCKET_INSTANCE_FROM_CDR, DATE_FORMAT).sql();
+        String sql = TableExtractSql.build(BUCKET_INSTANCE_FROM_CDR, DATE_FORMAT).sql();
 
         assertFalse(sql.contains("b.USAGE"),
                 "USAGE comes from the CDR session documents, so the table's counter is not read");
         assertTrue(sql.contains("si.USERNAME FROM BUCKET_INSTANCE b "
-                        + "LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID"),
+                        + "LEFT JOIN SERVICE_INSTANCE si ON si.ID = b.SERVICE_ID LEFT JOIN ("),
                 "the username the figures are keyed on is selected after the extract's columns");
         assertTrue(sql.endsWith(
                         " ORDER BY si.USERNAME NULLS LAST, b.EXPIRATION DESC NULLS LAST, b.ID DESC"),
                 "an ordering is what lets the aggregation be merge-joined rather than buffered");
-        assertTrue(TableExtractSql.build(TableExtracts.BUCKET_INSTANCE, DATE_FORMAT).sql()
+        assertTrue(TableExtractSql.build(BUCKET_INSTANCE, DATE_FORMAT).sql()
                         .contains("b.USAGE"),
                 "the fallback variant still reads it");
     }
@@ -106,14 +152,17 @@ class TableExtractSqlTest {
                 .contains("FROM SERVICE_INSTANCE si LEFT JOIN AAA_USER u ON u.USER_NAME = si.USERNAME"));
         assertTrue(TableExtractSql.build(TableExtracts.PLAN_TO_BUCKET, DATE_FORMAT).sql()
                 .endsWith("FROM PLAN_TO_BUCKET p"));
-        assertTrue(TableExtractSql.build(TableExtracts.BUCKET_INSTANCE, DATE_FORMAT).sql()
-                .endsWith("FROM BUCKET_INSTANCE b"));
+        assertTrue(TableExtractSql.build(BUCKET_INSTANCE, DATE_FORMAT).sql()
+                .contains("FROM BUCKET_INSTANCE b LEFT JOIN (SELECT SERVICE_ID, "
+                        + "MAX(BUCKET_ID) AS PLAN_BANDWIDTH FROM BUCKET_INSTANCE "
+                        + "WHERE BUCKET_TYPE = ? GROUP BY SERVICE_ID) bw "
+                        + "ON bw.SERVICE_ID = b.SERVICE_ID"));
     }
 
     @Test
     void selectsExactlyOneExpressionPerColumnOfTheExtract() {
-        List<Spec> specs = new ArrayList<>(TableExtracts.ALL);
-        specs.add(TableExtracts.BUCKET_INSTANCE_FROM_CDR);
+        List<Spec> specs = new ArrayList<>(TableExtracts.all(BANDWIDTH_TYPE));
+        specs.add(BUCKET_INSTANCE_FROM_CDR);
 
         for (Spec spec : specs) {
             String selectList = TableExtractSql.build(spec, DATE_FORMAT).sql();

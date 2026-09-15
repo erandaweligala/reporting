@@ -186,6 +186,9 @@ report:
 
   # MAC_SERVICE_TABLE, PLAN_TO_BUCKET and BUCKET_INSTANCE: whole-table extracts, as CSV.
   # One cursor and one sequential pass per extract; the knobs below are what bound its footprint.
+  # Two columns of BUCKET_INSTANCE are not columns of the row and have no knob here: USAGE, below,
+  # and RULE, which reports the bundle's bandwidth bucket — what USER_DATA_DUMP reports as
+  # PLAN_BANDWIDTH — under report.user-dump.bandwidth-bucket-type.
   table-extract:
     jdbc-fetch-size: 5000        # rows Oracle ships per round trip
     query-timeout-seconds: 7200  # an extract that has gone wrong is cancelled, not left running
@@ -233,7 +236,11 @@ report:
     # as written; the text is normalised to yyyy-MM-dd HH:mm:ss whatever date-format above says.
     # Set false for a consumer that reads the dump with something other than a spreadsheet.
     excel-safe-timestamps: true
-    bandwidth-bucket-type: BANDWIDTH       # BUCKET_INSTANCE.BUCKET_TYPE holding PLAN_BANDWIDTH
+    # BUCKET_INSTANCE.BUCKET_TYPE holding PLAN_BANDWIDTH. Two reports read it: the dump, as that
+    # column, and the BUCKET_INSTANCE extract, whose RULE column is the same figure for the
+    # bundle each bucket belongs to. Matched exactly, case included, so a deployment whose rows
+    # spell the type differently leaves both columns empty rather than one of them.
+    bandwidth-bucket-type: BANDWIDTH
     quota-bucket-type: DATA                # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA
     usage:
       enabled: true

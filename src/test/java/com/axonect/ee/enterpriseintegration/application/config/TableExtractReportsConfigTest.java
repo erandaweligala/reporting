@@ -14,6 +14,8 @@ import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,7 +31,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * Where BUCKET_INSTANCE.USAGE is read from is decided once, when the bean is built, and the two
- * figures cannot be told apart in the file — so the decision is worth holding to.
+ * figures cannot be told apart in the file — so the decision is worth holding to. The same is true
+ * of RULE, which reports the bundle's bandwidth bucket under whichever of the two variants runs.
  */
 class TableExtractReportsConfigTest {
 
@@ -64,15 +67,52 @@ class TableExtractReportsConfigTest {
     }
 
     @Test
-    void switchingItOffLeavesTheExtractTheSinglePlainScanItWas() throws Exception {
+    void switchingItOffLeavesTheExtractTheUnorderedScanItWas() throws Exception {
         properties.setUsageFromCdr(false);
 
         String sql = runBucketExtract();
 
-        assertTrue(sql.endsWith("FROM BUCKET_INSTANCE b"));
+        assertTrue(sql.endsWith("ON bw.SERVICE_ID = b.SERVICE_ID"),
+                "the table, and the bandwidth bucket RULE reports — no ordering, nothing else");
+        assertFalse(sql.contains("ORDER BY"));
         assertTrue(sql.contains("b.USAGE"));
         verify(rowReader, never()).streamInBinaryOrder(any(), anyInt(), anyInt(), any());
         verify(usageAggregationClient, never()).openBucketTotals(anyString(), anyString());
+    }
+
+    @Test
+    void ruleReportsThePlanBandwidthBucketWhicheverWayUsageIsRead() throws Exception {
+        // The consuming system reads one BUCKET_INSTANCE file, not two. Where USAGE comes from is
+        // a deployment's business and is not visible in the file, so it cannot decide what a
+        // second column means.
+        assertStatement(statement -> {
+            assertTrue(statement.sql().contains("bw.PLAN_BANDWIDTH"),
+                    "RULE is the bundle's bandwidth bucket");
+            assertFalse(statement.sql().contains("b.RULE"),
+                    "and not the table's own RULE column");
+            assertEquals(List.of(usageProperties.getBandwidthBucketType()), statement.params(),
+                    "under the bucket type the dump reads PLAN_BANDWIDTH under");
+        });
+
+        // The same bean built the other way round; the two verifications are of different
+        // methods of the reader, so the mock does not need resetting between them.
+        properties.setUsageFromCdr(false);
+
+        assertStatement(statement -> {
+            assertTrue(statement.sql().contains("bw.PLAN_BANDWIDTH"));
+            assertFalse(statement.sql().contains("b.RULE"));
+            assertEquals(List.of(usageProperties.getBandwidthBucketType()), statement.params());
+        });
+    }
+
+    @Test
+    void theBucketTypeRuleIsReadUnderIsTheDumpsOwnSetting() throws Exception {
+        // One setting, two reports: a deployment that renames the bucket type moves PLAN_BANDWIDTH
+        // and RULE together, because there is nowhere else to say it.
+        usageProperties.setBandwidthBucketType("FTTH_BANDWIDTH");
+
+        assertStatement(statement ->
+                assertEquals(List.of("FTTH_BANDWIDTH"), statement.params()));
     }
 
     @Test
@@ -106,8 +146,17 @@ class TableExtractReportsConfigTest {
                 config.planToBucketReportDefinition(rowReader, properties).reportType());
     }
 
-    /** Runs the configured bucket extract over an empty cursor and returns the statement it used. */
+    /** Runs the configured bucket extract over an empty cursor and checks the statement it used. */
+    private void assertStatement(Consumer<SqlStatement> assertions) throws Exception {
+        assertions.accept(runBucketExtractStatement());
+    }
+
+    /** As {@link #assertStatement}, for an assertion that only reads the text. */
     private String runBucketExtract() throws Exception {
+        return runBucketExtractStatement().sql();
+    }
+
+    private SqlStatement runBucketExtractStatement() throws Exception {
         TableExtractReportDefinition definition = config.bucketInstanceReportDefinition(
                 rowReader, properties, usageProperties, usageAggregationClient);
         assertEquals("BUCKET_INSTANCE", definition.reportType());
@@ -127,7 +176,7 @@ class TableExtractReportsConfigTest {
         } else {
             verify(rowReader).stream(statement.capture(), anyInt(), anyInt(), any());
         }
-        return statement.getValue().sql();
+        return statement.getValue();
     }
 
     private boolean readsTheCdrTotal() {

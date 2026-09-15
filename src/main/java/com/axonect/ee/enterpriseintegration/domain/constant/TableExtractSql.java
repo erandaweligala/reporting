@@ -10,10 +10,10 @@ import java.util.stream.Stream;
  * uses.
  *
  * <p>The statement is deliberately as plain as a statement can be: a projection over a
- * {@link Spec#from() from clause}, with no GROUP BY, no window function and — unless the extract
- * has an ordering to keep, see below — no ORDER BY. That is not laziness, it is the point. An
- * extract of this kind is read end to end, so the cheapest plan Oracle has for it is a single
- * multi-block full scan, and every clause that could be added takes that away:
+ * {@link Spec#from() from clause}, with no window function and — unless the extract has an ordering
+ * to keep, see below — no ORDER BY. That is not laziness, it is the point. An extract of this kind
+ * is read end to end, so the cheapest plan Oracle has for it is a single multi-block full scan, and
+ * every clause that could be added takes that away:
  *
  * <ul>
  *   <li>An ORDER BY over a few million rows either sorts in temp space or walks the primary key
@@ -25,6 +25,11 @@ import java.util.stream.Stream;
  *       dump does — but there each shard also had an Elasticsearch aggregation to overlap with and
  *       a four-way join to plan. Here there is nothing to overlap: N shards over one flat table
  *       are N scans of it, and the database does the same work N times to finish no sooner.</li>
+ *   <li>An aggregate belongs in the {@link Spec#from() from clause} and only where a column of the
+ *       extract is one — BUCKET_INSTANCE.RULE is the bandwidth bucket of the row's bundle, which is
+ *       a figure over the table rather than a column of the row. It is pre-aggregated in an inline
+ *       view and hash-joined in one pass, the shape the user data dump gives the same figure, so
+ *       the projection itself stays a projection.</li>
  * </ul>
  *
  * <p>Timestamps are converted to text by Oracle so the reader can pull every column with
@@ -100,18 +105,32 @@ public final class TableExtractSql {
      *                   also why the cursor is opened in binary collation when it is set: the
      *                   ordering has to be the one the other side produces, not the session's
      *                   linguistic sort
+     * @param params     values for the placeholders the spec's own SQL carries, in the order they
+     *                   appear in the finished statement. An extract has no filters and binds
+     *                   nothing per request; what is bound is configuration that names a value
+     *                   rather than a fragment of SQL — the bucket type behind BUCKET_INSTANCE.RULE
+     *                   — and it is bound rather than concatenated because it can be. The one value
+     *                   that cannot be, the date format model, is validated and written into the
+     *                   statement instead (see {@link OracleText#validateFormat})
      */
     public record Spec(String reportType, String from, List<Column> columns, List<Column> helpers,
-                       String orderBy) {
+                       String orderBy, List<Object> params) {
 
         public Spec {
             columns = List.copyOf(columns);
             helpers = List.copyOf(helpers);
+            params = List.copyOf(params);
         }
 
         /** An extract that is a plain projection: every column selected, nothing ordered. */
         public Spec(String reportType, String from, List<Column> columns) {
-            this(reportType, from, columns, List.of(), null);
+            this(reportType, from, columns, List.of(), null, List.of());
+        }
+
+        /** An extract whose statement binds nothing, ordered or not. */
+        public Spec(String reportType, String from, List<Column> columns, List<Column> helpers,
+                    String orderBy) {
+            this(reportType, from, columns, helpers, orderBy, List.of());
         }
 
         /** Whether the statement carries an ordering that has to agree with one outside it. */
@@ -167,10 +186,11 @@ public final class TableExtractSql {
     /**
      * Builds the extract statement.
      *
-     * <p>It carries no parameters: an extract has no filters, and the one value that varies with
-     * configuration — the date format model — cannot be bound, so it is validated and concatenated
-     * (see {@link OracleText#validateFormat}). Everything else in the statement comes from a
-     * {@link Spec} compiled into this service, never from a request.
+     * <p>Nothing here comes from a request. An extract has no filters, so the only values that
+     * reach the statement are the {@link Spec#params() spec's own} — configuration that names a
+     * value, bound the way a value is — and the date format model, which cannot be bound and is
+     * validated and concatenated instead (see {@link OracleText#validateFormat}). The rest of the
+     * statement is a {@link Spec} compiled into this service.
      */
     public static SqlStatement build(Spec spec, String dateFormat) {
         String selectList = Stream.concat(
@@ -187,7 +207,7 @@ public final class TableExtractSql {
             sql.append(" ORDER BY ").append(spec.orderBy());
         }
 
-        return new SqlStatement(sql.toString(), List.of());
+        return new SqlStatement(sql.toString(), spec.params());
     }
 
     private static String expressionOf(Column column, String dateFormat) {
