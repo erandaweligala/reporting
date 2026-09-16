@@ -30,7 +30,9 @@ public abstract class UserUsageCursor implements AutoCloseable {
     /**
      * What a user drew from the CDR indices the dump aggregated: the total usage of each bucket
      * they touched, the same totals split by the bundle that drew them, and the NAS IP address
-     * their sessions on the reported day were anchored to.
+     * their sessions were anchored to — the reported day's where that day's index holds sessions
+     * of theirs, and otherwise their most recent session's, since a session document is filed
+     * under the day the session started rather than the days it covered.
      *
      * <p>The bucket totals are lifetime figures, not a day's: UTLIZED_QUOTA is read next to QUOTA,
      * which is the bucket's whole allowance, so the usage beside it has to be everything drawn
@@ -49,18 +51,32 @@ public abstract class UserUsageCursor implements AutoCloseable {
      *                          {@link #usageOn(String, String, String)}
      * @param total             usage across every bucket the user touched
      * @param attributable      whether {@code perBucket} may be read
-     * @param nasIpAddress      NAS the reported day's sessions were anchored to, null when none
-     *                          was recorded
+     * @param nasIpAddress      NAS the user was anchored to, null when none was recorded
+     * @param nasIpFromAnotherDay whether that address came from the user's most recent session day
+     *                          instead of the reported one, which is where the address of a
+     *                          session that started on either side of the reported day is filed.
+     *                          The column reads the same either way; the dump counts them so a run
+     *                          whose reported day has no index of its own is not read as a day's
+     *                          worth of addresses
      */
     public record UserUsage(String userName, Map<String, Long> perBucket,
                             Map<String, Long> perServiceBucket, Set<String> splitBuckets,
-                            long total, boolean attributable, String nasIpAddress) {
+                            long total, boolean attributable, String nasIpAddress,
+                            boolean nasIpFromAnotherDay) {
 
         /** Separator between the two halves of a {@link #perServiceBucket} key. */
         private static final char KEY_SEPARATOR = '\u0000';
 
         public UserUsage {
             splitBuckets = splitBuckets == null ? Set.of() : splitBuckets;
+        }
+
+        /** A record whose address, where it has one, is the reported day's own. */
+        public UserUsage(String userName, Map<String, Long> perBucket,
+                         Map<String, Long> perServiceBucket, Set<String> splitBuckets,
+                         long total, boolean attributable, String nasIpAddress) {
+            this(userName, perBucket, perServiceBucket, splitBuckets, total, attributable,
+                    nasIpAddress, false);
         }
 
         /**

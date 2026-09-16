@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Comparator;
 import java.util.stream.Collectors;
 
@@ -339,6 +340,26 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
+    void writesTheAddressAUsersMostRecentSessionNamesWhereTheReportedDayNamedNone() throws Exception {
+        // The row this was reported on: a subscriber whose session came up this morning, so their
+        // session document is in today's index rather than the reported day's. UTLIZED_QUOTA has
+        // their usage, because the totals are summed over every index in the scan, and
+        // NAS_IP_ADDRESS came out empty beside it although the cluster held the address all along.
+        stubReader(List.<String[]>of(databaseRow("taiwowilliams", "FTTH_50Mbps", null, "DATA_1")));
+        stubUsageFromAnotherDay("taiwowilliams", "DATA_1", 80L, "192.168.239.85");
+
+        Path output = outputWithHeader("later-session.csv");
+        definition.streamTo(report(), output);
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals(39, written.length);
+        assertEquals("192.168.239.85", written[30],
+                "the column carries the address whichever day's index the session was filed under");
+        assertEquals("80", written[37], "UTLIZED_QUOTA");
+        assertEquals("bundle-end", written[38], "the columns after it must not shift");
+    }
+
+    @Test
     void usersWithoutSessionsThatDayGetAnEmptyUtilizedQuotaAndNasAddress() throws Exception {
         stubReader(List.<String[]>of(databaseRow("quietuser", "FTTH_50Mbps", "1024", "DATA_1")));
         stubUsage(Map.of());
@@ -628,6 +649,27 @@ class UserDataDumpReportDefinitionTest {
                     long total = buckets.values().stream().mapToLong(Long::longValue).sum();
                     return new UserUsage(user, buckets, drawnBy(buckets, drawnBy), total, true,
                             nasByUser.get(user));
+                }
+            };
+        });
+    }
+
+    /**
+     * One user the reported day's index holds no session of, whose address the aggregation
+     * therefore read from the newest index that does — a session that started after the reported
+     * day, or before it and still up, which is where the flag on the record comes from.
+     */
+    private void stubUsageFromAnotherDay(String user, String bucketId, long total, String nasIp) {
+        when(usageAggregationClient.open(any(), any(), any())).thenAnswer(invocation -> {
+            shardInProgress.set(OPEN_START);
+            var entry = new java.util.concurrent.atomic.AtomicReference<>(
+                    new UserUsageCursor.UserUsage(user, Map.of(bucketId, total),
+                            drawnBy(Map.of(bucketId, total), SERVICE_ID), Set.of(bucketId), total,
+                            true, nasIp, true));
+            return new UserUsageCursor() {
+                @Override
+                protected UserUsage fetchNext() {
+                    return entry.getAndSet(null);
                 }
             };
         });

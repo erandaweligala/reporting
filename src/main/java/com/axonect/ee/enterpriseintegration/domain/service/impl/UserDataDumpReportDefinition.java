@@ -116,8 +116,8 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     /**
      * Zero-based positions of the two columns that are not read from the database. AAA_USER
      * carries neither, so both are filled from the CDR session documents in Elasticsearch: the NAS
-     * the user's sessions were anchored to on the reported day, and the total the bundle has drawn
-     * from its quota bucket.
+     * the user's sessions were anchored to, and the total the bundle has drawn from its quota
+     * bucket.
      */
     private static final int NAS_IP_ADDRESS_POSITION = 30;
     private static final int UTILIZED_QUOTA_POSITION = 37;
@@ -297,12 +297,18 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
      * usernames, or the bucket ids, are not the ones the CDR documents are keyed on.
      *
      * <p>The NAS count is the same kind of tell for the column beside it, and it is counted apart
-     * from the others because the two columns fail apart. NAS_IP_ADDRESS is one day's, read
-     * through a filter and a field of its own, so it can be empty on every row of a run whose
-     * UTLIZED_QUOTA is perfectly good — which is what a mapping that spells the address field
-     * differently produces, and what went unnoticed until a run said so here. A handful of users
-     * is a subscriber base with quiet days in it; all of them is the field, the filter, or the
-     * day's index.
+     * from the others because the two columns fail apart. NAS_IP_ADDRESS is read through a filter
+     * and a field of its own, so it can be empty on every row of a run whose UTLIZED_QUOTA is
+     * perfectly good — which is what a mapping that spells the address field differently produces,
+     * and what went unnoticed until a run said so here. A handful of users is a subscriber base
+     * with quiet days in it; all of them is the field, the filter, or the day's index.
+     *
+     * <p>Beside it is how many of the addresses that were written are the user's most recent
+     * session's rather than the reported day's — the fallback a user has no session document filed
+     * under the reported day takes, which is every subscriber whose session started on either side
+     * of it and so most of an always-on base. It is worth its own figure for the same reason the
+     * others are: nothing in the file distinguishes the two, and a run reporting every row there
+     * is a run whose reported day has no index of its own rather than one reading the day it says.
      */
     private void logUsageCoverage(UsernameRange range, MacCollapsingWriter rows) {
         if (!properties.getUsage().isEnabled() || rows.written() == 0) {
@@ -313,10 +319,14 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
                         + "quota bucket their CDRs never name, whose UTLIZED_QUOTA is 0",
                 range.fromInclusive(), range.toExclusive(),
                 rows.withoutCdrUsage(), rows.written(), rows.withUnknownQuotaBucket());
-        log.info("Shard [{} .. {}) wrote an empty NAS_IP_ADDRESS for {} of {} user(s); the rest "
-                        + "were anchored to a NAS the reported day's sessions name",
+        log.info("Shard [{} .. {}) wrote an empty NAS_IP_ADDRESS for {} of {} user(s); of the "
+                        + "rest, {} were anchored to a NAS the reported day's own sessions name "
+                        + "and {} to one their most recent session names, the reported day's index "
+                        + "holding no session of theirs",
                 range.fromInclusive(), range.toExclusive(),
-                rows.withoutNasAddress(), rows.written());
+                rows.withoutNasAddress(), rows.written(),
+                rows.written() - rows.withoutNasAddress() - rows.nasAddressFromAnotherDay(),
+                rows.nasAddressFromAnotherDay());
     }
 
     /**
@@ -419,6 +429,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         private long withoutCdrUsage;
         private long withUnknownQuotaBucket;
         private long withoutNasAddress;
+        private long nasAddressFromAnotherDay;
         private long withoutPlanBandwidth;
 
         private MacCollapsingWriter(UserUsageCursor usage, StreamingCsvWriter writer,
@@ -480,11 +491,19 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
 
         /**
          * Users written with an empty NAS_IP_ADDRESS: the aggregation returned no address for
-         * them, whether because they held no session on the reported day or because nothing the
+         * them, whether because the scan holds no session of theirs at all or because nothing the
          * dump asked Elasticsearch for could have answered with one.
          */
         long withoutNasAddress() {
             return withoutNasAddress;
+        }
+
+        /**
+         * Users whose NAS_IP_ADDRESS is their most recent session's rather than the reported day's,
+         * the reported day's index holding no session of theirs to read one from.
+         */
+        long nasAddressFromAnotherDay() {
+            return nasAddressFromAnotherDay;
         }
 
         /**
@@ -529,6 +548,8 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             String nasIpAddress = cdr == null ? null : cdr.nasIpAddress();
             if (nasIpAddress == null || nasIpAddress.isEmpty()) {
                 withoutNasAddress++;
+            } else if (cdr.nasIpFromAnotherDay()) {
+                nasAddressFromAnotherDay++;
             }
             row[NAS_IP_ADDRESS_POSITION] = nasIpAddress;
             row[UTILIZED_QUOTA_POSITION] =

@@ -276,6 +276,19 @@ report:
       # one — and the log says which was taken. Override it only where cdr-service records the
       # address under some other name entirely.
       nas-ip-field: nasIpAddress.keyword
+      # Fill NAS_IP_ADDRESS from the user's most recent session where the reported day's index
+      # holds no session of theirs. cdr-service files a session document under the day the session
+      # STARTED, so that index is not "the sessions of that day": a line that came up this morning
+      # is in today's index, and one that came up last week and has not dropped since — an
+      # always-on FTTH line — is in last week's. Neither is in D-1's, so the filter that keeps the
+      # column the reported day's found nothing for them and the column came out empty beside a
+      # UTLIZED_QUOTA reporting that same session's usage, which is summed over every index in the
+      # scan. The reported day is still preferred, and the fallback is the newest index the user
+      # appears in — where they were last anchored, not the NAS they used most across the years the
+      # scan may cover. Each shard logs how many rows took it. Set false to report an empty column
+      # for a user with no session document filed under the reported day, whatever the cluster
+      # holds for them on either side of it.
+      nas-ip-fallback-to-latest-day: true
       # sessionInstances is mapped as a nested type. False says it is not, and Elasticsearch then
       # flattens it: usage cannot be attributed to one bucket at all, so UTLIZED_QUOTA and
       # BUCKET_INSTANCE.USAGE both report the subscriber's whole CDR total — the extract against

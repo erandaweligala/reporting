@@ -14,7 +14,7 @@ that make it survive that row count, and the settings an operator needs.
 | `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` — `RULE` of the bandwidth bucket, or of whichever bucket the bundle holds one on; `INITIAL_BALANCE` of the quota bucket |
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
 | `NOTIFICATION_TEMPLATES` | `AAA_USER.TEMPLATE_ID` — there is no column of that name either |
-| `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
+| `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to, or — where the D-1 index holds no session of theirs — the one their most recent session names |
 | `UTLIZED_QUOTA` | Elasticsearch: everything the reported bundle has drawn from its quota bucket, summed over every CDR index the cluster holds — today's included |
 | `CUSTOMER_ACTIVATION_DATE` | `AAA_USER.ACTIVATION_DATE` |
 
@@ -36,8 +36,7 @@ position and
 `UserDataDumpReportDefinition` splices the value in as it lays the row out, from the same
 Elasticsearch pass that already produces `UTLIZED_QUOTA` rather than from a lookup of its own. A
 user whose sessions named more than one NAS that day is reported under the one most of them used;
-a user with no session that day gets an empty column — and, unlike `UTLIZED_QUOTA`, gets it whether
-or not they have a session history, because the two columns cover different spans of it.
+a user the whole scan holds no session of gets an empty column.
 
 Every timestamp is written as `yyyy-MM-dd HH:mm:ss` — the `date-format` below is the Oracle model
 that produces it. Each column is still CAST to `TIMESTAMP` before `TO_CHAR` sees it, so the
@@ -192,8 +191,9 @@ well as by `BUCKET_ID`, because it is a row of that table and holds both. The du
 bucket through the plan and has only `BUCKET_ID` to offer — see `docs/table-extracts.md`.
 
 `NAS_IP_ADDRESS` comes out of the same pass and is **not** a lifetime figure — it is still the NAS
-that day's sessions were anchored to. It is read inside a filter on the reported day's own index,
-so widening the usage around it left it exactly where it was.
+the reported day's sessions were anchored to, read inside a filter of its own, so widening the usage
+around it left it where it was. What that filter needed afterwards is the next section: the index a
+session document sits in is the day the session *started*, which is not the day it covered.
 
 ## Which field `NAS_IP_ADDRESS` is read from
 
@@ -239,14 +239,17 @@ is used, exactly as it was before the lookup existed, and the log says the colum
 Each shard then counts what it actually wrote, so the column can never go quiet again:
 
 ```
-Shard [f .. s) wrote an empty NAS_IP_ADDRESS for 12 of 748210 user(s); the rest were anchored to
-a NAS the reported day's sessions name
+Shard [f .. s) wrote an empty NAS_IP_ADDRESS for 12 of 748210 user(s); of the rest, 651767 were
+anchored to a NAS the reported day's own sessions name and 96431 to one their most recent session
+names, the reported day's index holding no session of theirs
 ```
 
-A handful of users there is a subscriber base with quiet days in it. All of them is the field, the
-filter, or the day's index — and it is a separate count from the usage one above because the two
-columns fail apart: `NAS_IP_ADDRESS` is one day's, read through a filter and a field of its own,
-so it can be empty on every row of a run whose `UTLIZED_QUOTA` is right.
+A handful of users in the first figure is a subscriber base with quiet days in it. All of them is
+the field, the filter, or the day's index — and it is a separate count from the usage one above
+because the two columns fail apart: `NAS_IP_ADDRESS` is read through a filter and a field of its
+own, so it can be empty on every row of a run whose `UTLIZED_QUOTA` is right. The second figure is
+the fallback of the next section; every row of a run taking it is a reported day with no index of
+its own, rather than a day being read.
 
 The same figure, asked for by the same pair, is what the `BUCKET_INSTANCE` extract reports as
 `USAGE` — one row per bucket instance rather than one per user, so it asks for every bucket rather
@@ -260,6 +263,47 @@ whole CDR total: this one as their `UTLIZED_QUOTA`, and the extract against the 
 theirs that total belongs to — their quota bucket — with their other buckets reporting `0`. The
 extract used to give the column up to `BUCKET_INSTANCE.USAGE`, the counter AAA writes back, which
 is what left the two columns showing unrelated figures for the same subscriber.
+
+## Which day `NAS_IP_ADDRESS` is read from
+
+The reported day's index where that index holds a session of the user's, and the newest index that
+does where it holds none.
+
+The fallback is there because **a session document is filed under the day its session started**,
+not under the days that session covered. `radius-sessions-2026.09.15` is not "the sessions of the
+15th": it is the sessions *opened* on the 15th. So two ordinary subscribers have no document in it
+at all —
+
+- one whose line came up this morning, whose session is in today's index, and
+- one whose line came up last week and has not dropped since, whose session is in last week's —
+  which on an always-on FTTH base is most of it.
+
+— and a column read only through `_index = radius-sessions-2026.09.15` was empty for both, beside a
+`UTLIZED_QUOTA` reporting that very session's usage, because the totals are summed over every index
+in the scan. That is the row this was reported on:
+
+```
+USER_NAME       QUOTA        UTLIZED_QUOTA   NAS_IP_ADDRESS
+taiwowilliams   Unlimited    80                               ← session up since 05:55 today
+```
+
+The address was in the scan the whole time, one index over. So where the reported day's index names
+no address for a user, the dump reads the newest daily index that does: a terms aggregation on
+`_index` ordered by key descending and kept to one bucket, with the same NAS terms under it. The
+names sort by date because they are written `yyyy.MM.dd`, and ordering by the key rather than by
+doc count is what makes one bucket exact — each shard holds one index's documents and answers with
+its own name, so the merge keeps the newest of them.
+
+Newest, not busiest: the address reported is the one the subscriber was **last** anchored to, which
+is what an operator reading the column wants, rather than whichever NAS they used most across the
+years of history the scan may cover — that last figure is precisely what the reported day's filter
+exists to keep out of the column, and it stays out.
+
+The reported day still wins wherever it names an address, so no row that had one changes. A user
+the whole scan holds no session of still gets an empty column, as does one whose sessions named no
+NAS. The rows that took the fallback are counted in the shard line above, because nothing in the
+file separates them, and `usage.nas-ip-fallback-to-latest-day: false` restores the reported day as
+the only source for a consumer that needs the column to be that day's or nothing.
 
 ## Reading an empty or zero `UTLIZED_QUOTA`
 
@@ -444,6 +488,8 @@ report:
       services-per-user: 10      # bundles weighed against one of a user's buckets
       nas-addresses-per-user: 5  # distinct NAS addresses weighed before NAS_IP_ADDRESS is picked
       nas-ip-field: nasIpAddress.keyword
+      nas-ip-fallback-to-latest-day: true  # fill the column from the user's most recent session
+                                           # where the reported day's index holds none of theirs
       nested: true
       instances-path: sessionInstances
 ```
@@ -460,6 +506,13 @@ indices ending with today's and adds one index name to the search per day it cov
 several hundred days belongs to the wildcard (0) rather than to a list; `scope-to-service: false`
 is what a deployment whose CDRs do not carry `SERVICE_INSTANCE.ID` should be set to, and the
 per-shard log line says whether it is one.
+
+`usage.nas-ip-field` and `usage.nas-ip-fallback-to-latest-day` are the two behind the address —
+see **Which field** and **Which day `NAS_IP_ADDRESS` is read from** above. The field only needs
+overriding where cdr-service records the address under a different name altogether, since both
+spellings of the configured one are tried against the day's mapping; the fallback wants turning off
+only for a consumer that needs the column to be the reported day's or nothing, and the per-shard log
+line says how many rows it filled.
 
 `usage.nested` must describe how `sessionInstances` is actually mapped. Mapped as `nested`, usage
 can be summed per bucket. Mapped as a plain object, Elasticsearch flattens the array and a

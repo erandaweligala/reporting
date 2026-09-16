@@ -2,6 +2,7 @@ package com.axonect.ee.enterpriseintegration.domain.client;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.FieldValue;
+import co.elastic.clients.elasticsearch._types.SortOrder;
 import co.elastic.clients.elasticsearch._types.aggregations.Aggregate;
 import co.elastic.clients.elasticsearch._types.aggregations.Aggregation;
 import co.elastic.clients.elasticsearch._types.aggregations.CompositeAggregationSource;
@@ -14,6 +15,7 @@ import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.field_caps.FieldCapability;
 import co.elastic.clients.json.JsonData;
+import co.elastic.clients.util.NamedValue;
 import com.axonect.ee.enterpriseintegration.application.config.UserDumpProperties;
 import com.axonect.ee.enterpriseintegration.domain.exception.ReportClientException;
 import lombok.extern.slf4j.Slf4j;
@@ -65,6 +67,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * most-used address wins — doc values only, no fetch phase, which is what keeps 3 million users
  * affordable next to a {@code top_hits} per user.
  *
+ * <p>That filter is a preference rather than the whole of the column, because the index a session
+ * document lands in is the day the session <em>started</em>, not the days it covered. A session
+ * opened this morning is in today's index; one opened last week and still up is in last week's.
+ * Neither is in the reported day's, so a filter that only ever read that one index left those
+ * users with an empty NAS_IP_ADDRESS beside a UTLIZED_QUOTA reporting that very session's usage —
+ * the address was in the scan the whole time, one index over. So where the reported day's index
+ * names no address for a user, the newest daily index that does is read instead: the NAS they were
+ * last anchored to, not the one they used most across whatever history the cluster holds. Which of
+ * the two answered is carried on the record, because the file cannot be read for it.
+ *
  * <p>Which field that terms aggregation names is asked of the cluster rather than assumed, because
  * getting it wrong is invisible: a terms aggregation on a field the mapping does not have answers
  * with no terms and no error, so the dump writes an empty NAS_IP_ADDRESS for every user and the
@@ -89,10 +101,13 @@ public class UsageAggregationClient {
     private static final String AGG_BY_SERVICE = "by_service";
     private static final String AGG_USAGE = "usage";
     private static final String AGG_REPORTED_DAY = "reported_day";
+    private static final String AGG_LATEST_DAY = "latest_day";
     private static final String AGG_NAS_IP = "nas_ip";
     private static final String USERNAME_FIELD = "userName.keyword";
     /** Metadata field the NAS filter pins to the reported day's own index. */
     private static final String INDEX_FIELD = "_index";
+    /** Terms ordering that makes the newest daily index — the highest name — the first bucket. */
+    private static final String KEY_ORDER = "_key";
 
     /** Suffix that names the aggregatable sub-field of a {@code text} mapping. */
     private static final String KEYWORD_SUFFIX = ".keyword";
@@ -447,6 +462,9 @@ public class UsageAggregationClient {
             // be told which field maps the address leaves them out for the same reason.
             if (reportedDayIndex != null && nasIpField != null) {
                 aggregations.put(AGG_REPORTED_DAY, reportedDay());
+                if (config.isNasIpFallbackToLatestDay()) {
+                    aggregations.put(AGG_LATEST_DAY, latestDay());
+                }
             }
 
             if (!config.isNested()) {
@@ -505,20 +523,64 @@ public class UsageAggregationClient {
          * session document, not on an instance, so this sits beside the usage aggregation whether
          * or not the instances are nested.
          *
-         * <p>The field it names is the one {@link #resolveNasIpField} found in that index's own
-         * mapping, not the configured spelling as it stands: the two differ by a
-         * {@code .keyword} sub-field that a {@code text} mapping has and a {@code keyword} or
-         * {@code ip} one does not, and aggregating the wrong one of them is what empties the
-         * column for every user without raising anything.
+         * <p>It is the preferred source rather than the only one: a user with no session document
+         * filed under that day falls back to {@link #latestDay()}, which is where a session that
+         * started on either side of the reported day has its address.
          */
         private Aggregation reportedDay() {
-            Aggregation nasIp = new Aggregation.Builder()
-                    .terms(t -> t.field(nasIpField).size(config.getNasAddressesPerUser()))
-                    .build();
-
             return new Aggregation.Builder()
                     .filter(f -> f.term(t -> t.field(INDEX_FIELD).value(reportedDayIndex)))
-                    .aggregations(AGG_NAS_IP, nasIp)
+                    .aggregations(AGG_NAS_IP, nasIpAddresses())
+                    .build();
+        }
+
+        /**
+         * The same addresses, read from the newest daily index the user appears in at all — what
+         * fills NAS_IP_ADDRESS where the reported day's own index names none.
+         *
+         * <p>It is needed because a session document is filed under the day its session
+         * <em>started</em>, which is not the day, or the days, that session covers. A subscriber
+         * who came up this morning has their address in today's index; one who came up last week
+         * and has not dropped since — an always-on FTTH line, which is most of a base — has it in
+         * last week's. Neither appears in the reported day's index at all, so the filter above
+         * finds nothing for them and the column came out empty next to a UTLIZED_QUOTA reporting
+         * that same session's usage, because the totals are summed over every index in the scan.
+         *
+         * <p>A terms aggregation on {@code _index} ordered by key descending, kept to one bucket,
+         * is that newest index: the daily names sort by date because they are written
+         * {@code yyyy.MM.dd}. Ordering by the key rather than by doc count is also what makes the
+         * single bucket exact — every shard holds one index's documents and so answers with its
+         * own name, and the merge keeps the highest of them — and it is the newest index that is
+         * wanted rather than the busiest, which would be the many-year "NAS they used most" that
+         * the reported day's filter exists to avoid reporting.
+         *
+         * <p>It reads the same field, resolved the same way, and stays inside the same pass: one
+         * more doc-values aggregation per user, not a lookup of its own. That field is the one the
+         * reported day's mapping can aggregate, which is the mapping the run resolved against — an
+         * older index that spells the address the other way answers this with no terms, the same
+         * empty column it would have given anyway, and the shard's count says how many rows are
+         * still without an address.
+         */
+        private Aggregation latestDay() {
+            return new Aggregation.Builder()
+                    .terms(t -> t.field(INDEX_FIELD)
+                            .size(1)
+                            .order(NamedValue.of(KEY_ORDER, SortOrder.Desc)))
+                    .aggregations(AGG_NAS_IP, nasIpAddresses())
+                    .build();
+        }
+
+        /**
+         * The addresses a set of the user's sessions named, most used first. The field is the one
+         * {@link #resolveNasIpField} found in the reported day's own mapping, not the configured
+         * spelling as it stands: the two differ by a {@code .keyword} sub-field that a
+         * {@code text} mapping has and a {@code keyword} or {@code ip} one does not, and
+         * aggregating the wrong one of them is what empties the column for every user without
+         * raising anything.
+         */
+        private Aggregation nasIpAddresses() {
+            return new Aggregation.Builder()
+                    .terms(t -> t.field(nasIpField).size(config.getNasAddressesPerUser()))
                     .build();
         }
 
@@ -528,11 +590,20 @@ public class UsageAggregationClient {
                 return null;
             }
             String userName = key.stringValue();
-            String nasIpAddress = nasIpAddressOf(bucket);
+            String nasIpAddress = nasIpAddressOf(bucket, AGG_REPORTED_DAY);
+            // Only where the reported day's own index named none: a session that started before
+            // that day and ran through it, or one that started after it, is filed under another
+            // index and is all the cluster holds for such a user.
+            boolean fromAnotherDay = false;
+            if (nasIpAddress == null) {
+                nasIpAddress = nasIpAddressOf(bucket, AGG_LATEST_DAY);
+                fromAnotherDay = nasIpAddress != null;
+            }
 
             if (!config.isNested()) {
                 double total = bucket.aggregations().get(AGG_USAGE).sum().value();
-                return new UserUsage(userName, noBuckets(), noBuckets(), (long) total, false, nasIpAddress);
+                return new UserUsage(userName, noBuckets(), noBuckets(), Set.of(), (long) total,
+                        false, nasIpAddress, fromAnotherDay);
             }
 
             List<StringTermsBucket> bucketTerms = bucket.aggregations()
@@ -553,8 +624,8 @@ public class UsageAggregationClient {
                     splitBuckets.add(bucketId);
                 }
             }
-            return new UserUsage(
-                    userName, perBucket, perServiceBucket, splitBuckets, total, true, nasIpAddress);
+            return new UserUsage(userName, perBucket, perServiceBucket, splitBuckets, total, true,
+                    nasIpAddress, fromAnotherDay);
         }
 
         /**
@@ -585,32 +656,48 @@ public class UsageAggregationClient {
         }
 
         /**
-         * The address most of the user's sessions on the reported day were anchored to, or null
-         * when none of them reported one — a session cached before cdr-service recorded the field,
-         * or a CDR that omitted it, leaves the document without the value rather than with an
-         * empty one. A user whose sessions are all older than the reported day reaches here from
-         * the same stream, with an empty filter and so with no address, which is what a user with
-         * no session that day has always been reported as.
+         * The address most of the user's sessions under {@code dayAggregation} were anchored to,
+         * or null when that day has no sessions of theirs or none of those named a NAS — a session
+         * cached before cdr-service recorded the field, or a CDR that omitted it, leaves the
+         * document without the value rather than with an empty one.
+         *
+         * <p>The two days are the same shape once unwrapped, and differ only in how they were
+         * selected: {@link #AGG_REPORTED_DAY} is a filter pinned to the reported day's index, and
+         * {@link #AGG_LATEST_DAY} the newest index the user appears in, which is read only when
+         * the first named nothing. A caller that asked for neither — the bucket extract — finds
+         * no aggregation under either name and is reported with no address at all, exactly as it
+         * was before the fallback existed.
          */
-        private String nasIpAddressOf(CompositeBucket bucket) {
-            Aggregate day = bucket.aggregations().get(AGG_REPORTED_DAY);
-            if (day == null || !day.isFilter()) {
+        private String nasIpAddressOf(CompositeBucket bucket, String dayAggregation) {
+            Aggregate day = bucket.aggregations().get(dayAggregation);
+            if (day == null) {
                 return null;
             }
-            Aggregate aggregate = day.filter().aggregations().get(AGG_NAS_IP);
+            Aggregate addresses = day.isFilter()
+                    ? day.filter().aggregations().get(AGG_NAS_IP)
+                    : newestDayOf(day);
             // An index whose mapping predates the field answers with no terms at all — the dump
-            // reports an empty NAS_IP_ADDRESS for that day rather than failing over it.
-            if (aggregate == null || !aggregate.isSterms()) {
+            // reports an empty NAS_IP_ADDRESS for that user rather than failing over it.
+            if (addresses == null || !addresses.isSterms()) {
                 return null;
             }
-            List<StringTermsBucket> addresses = aggregate.sterms().buckets().array();
-            return addresses.isEmpty() ? null : addresses.get(0).key().stringValue();
+            List<StringTermsBucket> found = addresses.sterms().buckets().array();
+            return found.isEmpty() ? null : found.get(0).key().stringValue();
+        }
+
+        /** The one index bucket {@link #latestDay()} keeps, unwrapped to the addresses under it. */
+        private Aggregate newestDayOf(Aggregate day) {
+            if (!day.isSterms()) {
+                return null;
+            }
+            List<StringTermsBucket> days = day.sterms().buckets().array();
+            return days.isEmpty() ? null : days.get(0).aggregations().get(AGG_NAS_IP);
         }
     }
 
     /** Exposed for tests: the aggregation names this client reads back. */
     static List<String> aggregationNames() {
         return new ArrayList<>(List.of(AGG_BY_USER, AGG_INSTANCES, AGG_BY_BUCKET, AGG_BY_SERVICE,
-                AGG_USAGE, AGG_REPORTED_DAY, AGG_NAS_IP));
+                AGG_USAGE, AGG_REPORTED_DAY, AGG_LATEST_DAY, AGG_NAS_IP));
     }
 }

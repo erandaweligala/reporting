@@ -187,6 +187,33 @@ public class UserDumpProperties {
         private String nasIpField = "nasIpAddress.keyword";
 
         /**
+         * Whether a user whose sessions the reported day's index holds none of is reported under
+         * the NAS their most recent session named, rather than under an empty column.
+         *
+         * <p>On, because the column was empty for subscribers whose address the cluster plainly
+         * holds. cdr-service files a session document under the day the session <em>started</em>,
+         * so the reported day's index is not "the sessions of that day": a session opened this
+         * morning is in today's index, and one opened last week and still up — which is most of an
+         * FTTH base — is in last week's. Either way the reported day's own index holds nothing for
+         * that user, so the filter that keeps NAS_IP_ADDRESS the reported day's found no address
+         * while UTLIZED_QUOTA beside it, summed over every index the scan covers, reported that
+         * same session's usage. A row carrying usage the CDRs recorded and no NAS to go with it is
+         * the tell, and the address is the one the dump had all along.
+         *
+         * <p>The reported day is still preferred: the fallback is read only where that day's index
+         * names no address, and it is the address of the newest daily index the user appears in —
+         * where they were last anchored, not whichever NAS they used most across the years of
+         * history the scan may cover. The dump logs per shard how many rows took it, so a run
+         * whose reported day is missing its index altogether reads as what it is rather than as a
+         * column that quietly changed meaning.
+         *
+         * <p>Off restores the reported day as the only source: a user with no session document
+         * filed under that day reports an empty NAS_IP_ADDRESS, whatever the cluster holds for
+         * them on either side of it.
+         */
+        private boolean nasIpFallbackToLatestDay = true;
+
+        /**
          * Whether sessionInstances is mapped as a nested type. When it is, usage can be summed
          * per bucket; when it is not, Elasticsearch flattens the array and a per-bucket sum would
          * silently attribute every instance's usage to every bucket the session touched, so the
