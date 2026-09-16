@@ -80,10 +80,17 @@ public class UserDumpProperties {
      */
     private boolean excelSafeTimestamps = true;
 
-    /** BUCKET_INSTANCE.BUCKET_TYPE whose RULE is the plan bandwidth. */
+    /**
+     * BUCKET_INSTANCE.BUCKET_TYPE whose RULE is the plan bandwidth.
+     *
+     * <p>Matched on normalised text rather than literally, and not the only bucket that can answer:
+     * a bundle holding no bucket of this type reports the RULE its own buckets carry. Empty is
+     * therefore a setting rather than a gap — it means "whichever bucket holds the rule", which is
+     * what a deployment keeping one bucket per bundle wants. See {@code UserDumpSql}.
+     */
     private String bandwidthBucketType = "BANDWIDTH";
 
-    /** BUCKET_INSTANCE.BUCKET_TYPE that carries the data quota. */
+    /** BUCKET_INSTANCE.BUCKET_TYPE that carries the data quota, matched the same way. */
     private String quotaBucketType = "DATA";
 
     /** Per-user lookup against the CDR session documents in Elasticsearch. */

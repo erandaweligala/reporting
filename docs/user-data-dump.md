@@ -11,7 +11,7 @@ that make it survive that row count, and the settings an operator needs.
 | `USER_ID`, and every column not listed below | `AAA_USER` |
 | `MAC_ADDRESS`, `ORIGINAL_MAC_ADDRESS` | `AAA_USER_MAC_ADDRESS`, one cursor row each, comma-joined per user as the rows are read (see below) |
 | `BUNDLE_ACTIVATION_DATE`, `BUNDLE_NAME`, `BUNDLE_DEACTIVATION_DATE` | `SERVICE_INSTANCE` |
-| `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` — `RULE` of the bandwidth bucket, `INITIAL_BALANCE` of the quota bucket |
+| `PLAN_BANDWIDTH`, `QUOTA` | `BUCKET_INSTANCE` — `RULE` of the bandwidth bucket, or of whichever bucket the bundle holds one on; `INITIAL_BALANCE` of the quota bucket |
 | `SLMN` | the username — `AAA_USER` has no `SLMN` column |
 | `NOTIFICATION_TEMPLATES` | `AAA_USER.TEMPLATE_ID` — there is no column of that name either |
 | `NAS_IP_ADDRESS` | Elasticsearch: the NAS the user's D-1 sessions were anchored to |
@@ -74,6 +74,48 @@ file changes with it, and only the five columns the statement renders with `TO_C
 `QUOTA` is left **empty** for a bundle whose data bucket is unlimited: the consumer reads a blank
 there as "no cap", so `UserDumpSql` excludes unlimited buckets from the pivot rather than writing a
 label into the column.
+
+## Which bucket `PLAN_BANDWIDTH` comes from
+
+The bandwidth bucket's `RULE` where the bundle has such a bucket, and the `RULE` its own buckets do
+carry where it has not.
+
+The column reached the file **empty on every row** while it was only ever the `RULE` of a bucket
+whose `BUCKET_TYPE` equalled `bandwidth-bucket-type` exactly, and the rows it was reported from all
+held a rate rule. A pivot that matches no row is not an error anywhere in the run — it is a `NULL`,
+so an empty column is all it produces, and it produces it for every subscriber at once. Two ways to
+match nothing were both live:
+
+- **The type is spelled differently.** `BUCKET_TYPE` carries whatever case and padding the plan was
+  defined with, and `'Bandwidth' = 'BANDWIDTH'` is false in Oracle. The `USAGE` column of the
+  `BUCKET_INSTANCE` extract has compared the same setting with `equalsIgnoreCase` for as long as it
+  has read it; the dump compared it with `=`. Both sides of the comparison are now normalised —
+  `UPPER(TRIM(BUCKET_TYPE))` against a trimmed, upper-cased bind — so the spelling no longer decides
+  whether a bucket is found.
+- **There is no bandwidth bucket at all.** A deployment that keeps one bucket per bundle carries the
+  rate rule on that one bucket, whatever its type, and no value of `bandwidth-bucket-type` reaches
+  it. The pivot therefore falls back: where no bucket of the configured type answers, the `RULE` the
+  bundle's buckets do carry is reported. The fallback is an aggregate over the same group, so it can
+  only ever see the buckets of the service instance being reported — the join to `svc` has already
+  pruned it to that bundle — and a deployment with a real bandwidth bucket never reaches it, because
+  its pivot matches.
+
+An empty `PLAN_BANDWIDTH` therefore no longer means the bandwidth bucket is named something else. It
+means the statement found the bundle no bucket carrying a `RULE`, which on a subscriber base that
+has them is `BUCKET_INSTANCE` holding no row for the `SERVICE_INSTANCE` the dump picked. The rows are
+counted and the shard says so, because the file cannot be read for it:
+
+```
+Shard [ .. 4) wrote an empty PLAN_BANDWIDTH for 0 of 762143 user(s) ...
+```
+
+The line is logged only when the count is not zero.
+
+Leaving `bandwidth-bucket-type` unset is a supported setting and means "whichever bucket holds the
+rule": it is bound as a value Oracle matches nothing against, so every row takes the fallback.
+`quota-bucket-type` has no such fallback — an arbitrary bucket's `INITIAL_BALANCE` is not this
+bundle's allowance — so an unset quota type reports an empty `QUOTA`, and `UTLIZED_QUOTA` beside it
+degrades to the subscriber's total across buckets, as it always has when no quota bucket is named.
 
 ## What `UTLIZED_QUOTA` is the total of
 
@@ -442,8 +484,9 @@ starting point, not a maximum.
   bandwidth bucket's `RULE` — the rate rule it is policed by — is what the dump reports as
   `PLAN_BANDWIDTH` (`FTTH_50Mbps` in the sample). `BUCKET_ID` names the bucket that rule belongs
   to and is read only as the key the `UTLIZED_QUOTA` lookup is asked with. Both type values are
-  configurable above. `IS_UNLIMITED = 1` marks a bucket with no cap, and such a bucket is reported
-  as an empty `QUOTA`.
+  configurable above, and neither is matched literally — see **Which bucket `PLAN_BANDWIDTH` comes
+  from** below. `IS_UNLIMITED = 1` marks a bucket with no cap, and such a bucket is reported as an
+  empty `QUOTA`.
 - `CYCLE_DATE` is not a timestamp. It is the one date-named column the dump does not run through
   `TO_CHAR`, so if it turns out to be an Oracle `DATE` it will come back in the session's NLS
   format rather than the dump's — it is blank in the sample extract, so the schema is the only

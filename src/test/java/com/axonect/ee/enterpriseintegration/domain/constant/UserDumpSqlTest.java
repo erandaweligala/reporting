@@ -128,12 +128,57 @@ class UserDumpSqlTest {
 
         // The bandwidth bucket's RULE is the rate the plan grants; BUCKET_ID only names the bucket
         // that rule belongs to, and reporting it put the bucket's name in the column instead.
-        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.RULE END) AS PLAN_BANDWIDTH"),
+        assertTrue(sql.contains("MAX(CASE WHEN UPPER(TRIM(b.BUCKET_TYPE)) = ? THEN b.RULE END)"),
                 "PLAN_BANDWIDTH must be pivoted out of BUCKET_INSTANCE.RULE");
         // The quota bucket's id is still read by BUCKET_ID: it is what the usage lookup is asked
         // with, not a column of the dump.
-        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS QUOTA_BUCKET_ID"),
+        assertTrue(sql.contains("MAX(CASE WHEN UPPER(TRIM(b.BUCKET_TYPE)) = ? THEN b.BUCKET_ID END) "
+                        + "AS QUOTA_BUCKET_ID"),
                 "the helper column keeps naming the plan's bucket");
+    }
+
+    @Test
+    void fallsBackToTheRuleTheBundlesOwnBucketsCarryWhenNoneIsTheBandwidthBucket() {
+        String sql = build(null, null).sql();
+
+        // A pivot naming a bucket type no row carries is a NULL, not an error, and it is what left
+        // PLAN_BANDWIDTH empty on every row of a deployment that keeps one bucket per bundle with
+        // the rate rule on it. The bundle's own buckets answer for the missing bandwidth bucket —
+        // its own and no one else's, because the join to svc has already pruned the aggregate to
+        // this service instance.
+        assertTrue(sql.contains("NVL(MAX(CASE WHEN UPPER(TRIM(b.BUCKET_TYPE)) = ? THEN b.RULE END),"
+                        + "            MAX(b.RULE)) AS PLAN_BANDWIDTH"),
+                "PLAN_BANDWIDTH must fall back to the RULE the service's buckets carry");
+        assertTrue(sql.contains("JOIN svc ON svc.ID = b.SERVICE_ID"),
+                "the fallback may only ever see the reported bundle's own buckets");
+        // The quota is not the same kind of column: an arbitrary bucket's INITIAL_BALANCE is not
+        // this bundle's allowance, so there is nothing to fall back to.
+        assertFalse(sql.contains("MAX(b.INITIAL_BALANCE)"),
+                "QUOTA must come from the quota bucket or from nowhere");
+    }
+
+    @Test
+    void matchesTheBucketTypeWhateverCaseOrPaddingTheColumnCarries() {
+        // AAA writes BUCKET_TYPE in whatever case the plan was defined with — the CDR side of this
+        // same pair of settings has matched it with equalsIgnoreCase for that reason — so a row
+        // holding 'Bandwidth' must meet a deployment configured with 'BANDWIDTH'.
+        SqlStatement statement = UserDumpSql.build(null, null, DAY_START, DAY_END,
+                " Bandwidth ", "Data", DATE_FORMAT);
+
+        assertFalse(statement.sql().contains("b.BUCKET_TYPE = ?"),
+                "the column must be normalised before it is compared, not compared as it stands");
+        assertEquals(List.of(DAY_END, DAY_START, "BANDWIDTH", "DATA", "DATA"), statement.params(),
+                "the configured type is bound in the one spelling the column is normalised to");
+    }
+
+    @Test
+    void anUnconfiguredBucketTypeIsBoundAsAValueOracleMatchesNothingAgainst() {
+        // The empty string is NULL to Oracle, so it compares equal to no row at all — an unset
+        // bandwidth type takes the fallback and an unset quota type leaves QUOTA empty. It is
+        // bound rather than left as a Java null because the reader binds with setObject, which
+        // has no type to give a bare null.
+        assertEquals(List.of(DAY_END, DAY_START, "", "", ""),
+                UserDumpSql.build(null, null, DAY_START, DAY_END, null, "  ", DATE_FORMAT).params());
     }
 
     @Test
@@ -261,7 +306,8 @@ class UserDumpSqlTest {
 
         // The consuming system reads an empty QUOTA as "no cap", so an unlimited bucket must not
         // reach the pivot at all rather than being labelled.
-        assertTrue(sql.contains("MAX(CASE WHEN b.BUCKET_TYPE = ? AND NVL(b.IS_UNLIMITED, 0) <> 1"),
+        assertTrue(sql.contains("MAX(CASE WHEN UPPER(TRIM(b.BUCKET_TYPE)) = ? "
+                        + "AND NVL(b.IS_UNLIMITED, 0) <> 1"),
                 "unlimited buckets must be excluded from the QUOTA pivot");
         assertFalse(sql.contains("IS_UNLIMITED = 1 THEN ?"),
                 "no label may be bound in for an unlimited quota");

@@ -233,8 +233,15 @@ report:
     # as written; the text is normalised to yyyy-MM-dd HH:mm:ss whatever date-format above says.
     # Set false for a consumer that reads the dump with something other than a spreadsheet.
     excel-safe-timestamps: true
-    bandwidth-bucket-type: BANDWIDTH       # BUCKET_INSTANCE.BUCKET_TYPE whose RULE is PLAN_BANDWIDTH
-    quota-bucket-type: DATA                # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA
+    # BUCKET_INSTANCE.BUCKET_TYPE whose RULE is PLAN_BANDWIDTH. Matched on normalised text, so a
+    # column reading 'Bandwidth' meets it; a bundle holding no bucket of this type reports the RULE
+    # its own buckets do carry, which is what a deployment keeping one bucket per bundle has. Leave
+    # it empty for "whichever bucket holds the rule".
+    bandwidth-bucket-type: BANDWIDTH
+    # BUCKET_INSTANCE.BUCKET_TYPE holding QUOTA, matched the same way. There is no fallback here:
+    # another bucket's INITIAL_BALANCE is not this bundle's allowance, so a type that names no
+    # bucket leaves QUOTA empty and UTLIZED_QUOTA the subscriber's total across buckets.
+    quota-bucket-type: DATA
     usage:
       enabled: true
       index: radius-sessions     # cdr-service `sessions-data`; the daily indices are derived from it

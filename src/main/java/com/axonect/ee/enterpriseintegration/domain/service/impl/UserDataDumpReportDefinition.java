@@ -132,6 +132,18 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
     private static final int MAC_ADDRESS_POSITION = 19;
     private static final int ORIGINAL_MAC_ADDRESS_POSITION = 21;
 
+    /**
+     * Zero-based position of PLAN_BANDWIDTH, which is read back after it is written rather than
+     * only written: it is the one bucket column whose failure leaves no other trace.
+     *
+     * <p>An empty PLAN_BANDWIDTH is a bundle whose buckets the statement could not reach — no
+     * bucket row for the reported service instance at all — and nothing in the file or in the run
+     * says so. A dump that wrote it empty on every row read exactly like a subscriber base with no
+     * bandwidth on its plans. So the rows are counted here for the line the shard logs, the same
+     * way NAS_IP_ADDRESS is: a handful is a plan without a rate rule, all of them is the join.
+     */
+    private static final int PLAN_BANDWIDTH_POSITION = 35;
+
     private final StreamingRowReader rowReader;
     private final UsageAggregationClient usageAggregationClient;
     private final UserDumpProperties properties;
@@ -268,6 +280,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
                     range.fromInclusive(), range.toExclusive(), rows.written(), System.currentTimeMillis() - start);
             logUsageCoverage(range, rows);
             logQuotaAttribution(range, rows);
+            logBucketCoverage(range, rows);
             return rows.written();
         }
     }
@@ -304,6 +317,30 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
                         + "were anchored to a NAS the reported day's sessions name",
                 range.fromInclusive(), range.toExclusive(),
                 rows.withoutNasAddress(), rows.written());
+    }
+
+    /**
+     * Says so when the shard wrote an empty PLAN_BANDWIDTH, and stays quiet when it did not.
+     *
+     * <p>The column is the RULE of the reported bundle's bandwidth bucket, or — where the bundle
+     * holds no bucket of that type — of whichever of its buckets carries one. Empty is therefore
+     * not a bucket of the wrong type any more: it is a bundle whose buckets the statement reached
+     * none of, which means BUCKET_INSTANCE holds no row for the SERVICE_INSTANCE the dump picked.
+     * That is worth a line, because it is the failure this column has actually had and the file
+     * cannot be read for it — every row empty looks exactly like a subscriber base whose plans
+     * grant no rate.
+     */
+    private void logBucketCoverage(UsernameRange range, MacCollapsingWriter rows) {
+        if (rows.withoutPlanBandwidth() == 0) {
+            return;
+        }
+        log.info("Shard [{} .. {}) wrote an empty PLAN_BANDWIDTH for {} of {} user(s): no bucket "
+                        + "of the reported bundle carries a RULE. All of them means BUCKET_INSTANCE "
+                        + "holds nothing for the bundle the dump reported, not that the bandwidth "
+                        + "bucket is named differently — the pivot falls back to the bundle's own "
+                        + "buckets whatever their type",
+                range.fromInclusive(), range.toExclusive(),
+                rows.withoutPlanBandwidth(), rows.written());
     }
 
     /**
@@ -382,6 +419,7 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         private long withoutCdrUsage;
         private long withUnknownQuotaBucket;
         private long withoutNasAddress;
+        private long withoutPlanBandwidth;
 
         private MacCollapsingWriter(UserUsageCursor usage, StreamingCsvWriter writer,
                                     boolean scopeToService) {
@@ -450,6 +488,15 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
         }
 
         /**
+         * Users written with an empty PLAN_BANDWIDTH: the statement found no bucket carrying a
+         * RULE for the bundle it reported, having already fallen back from the bandwidth bucket to
+         * every bucket that bundle holds.
+         */
+        long withoutPlanBandwidth() {
+            return withoutPlanBandwidth;
+        }
+
+        /**
          * Lays one result set row out over the CSV columns, splicing the two Elasticsearch-filled
          * columns into the positions the database has no column for. Everything before
          * NAS_IP_ADDRESS lands on its own position; everything between it and UTLIZED_QUOTA is one
@@ -462,6 +509,11 @@ public class UserDataDumpReportDefinition implements StreamingReportDefinition {
             }
             for (int column = UserDumpSql.COL_NOTIFICATION_TEMPLATES; column <= UserDumpSql.COL_QUOTA; column++) {
                 row[column] = resultSet.getString(column);
+            }
+
+            String planBandwidth = row[PLAN_BANDWIDTH_POSITION];
+            if (planBandwidth == null || planBandwidth.isEmpty()) {
+                withoutPlanBandwidth++;
             }
 
             String quotaBucketId = resultSet.getString(UserDumpSql.COL_QUOTA_BUCKET_ID);

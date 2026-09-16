@@ -279,6 +279,25 @@ class UserDataDumpReportDefinitionTest {
     }
 
     @Test
+    void aBundleWithNoBucketRuleLeavesThePlanBandwidthEmptyWithoutShiftingTheRow() throws Exception {
+        // PLAN_BANDWIDTH is read back after it is written, to count the rows the statement found
+        // no bucket RULE for — the one thing an empty column there can still mean now that the
+        // pivot falls back to the bundle's own buckets. Reading it must leave the row alone.
+        stubReader(List.<String[]>of(databaseRow("nobucketuser", null, "1024", "DATA_1")));
+        stubUsage(Map.of("nobucketuser", Map.of("DATA_1", 512L)));
+
+        Path output = outputWithHeader("no-bandwidth.csv");
+        definition.streamTo(report(), output);
+
+        String[] written = Files.readAllLines(output).get(1).split(",", -1);
+        assertEquals(39, written.length);
+        assertEquals("col34", written[34], "BUNDLE_NAME");
+        assertEquals("", written[35], "PLAN_BANDWIDTH");
+        assertEquals("1024", written[36], "QUOTA");
+        assertEquals("512", written[37], "UTLIZED_QUOTA");
+    }
+
+    @Test
     void reportsWhatTheBundleDrewFromItsBucketRatherThanWhatEveryBundleDrew() throws Exception {
         // The bucket id names the plan's bucket, so a recurring subscriber draws on the same one
         // every cycle. 900 of the 1024 belong to a bundle that has since expired, and QUOTA beside
