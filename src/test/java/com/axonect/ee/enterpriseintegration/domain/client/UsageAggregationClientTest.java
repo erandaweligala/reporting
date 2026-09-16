@@ -6,17 +6,20 @@ import co.elastic.clients.elasticsearch.core.FieldCapsResponse;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.field_caps.FieldCapability;
+import co.elastic.clients.json.JsonpDeserializer;
 import co.elastic.clients.json.JsonpMapper;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import com.axonect.ee.enterpriseintegration.application.config.UserDumpProperties;
 import com.axonect.ee.enterpriseintegration.domain.exception.ReportClientException;
 import jakarta.json.stream.JsonGenerator;
+import jakarta.json.stream.JsonParser;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 
 import java.io.IOException;
+import java.io.StringReader;
 import java.io.StringWriter;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -299,6 +302,122 @@ class UsageAggregationClientTest {
         verify(elasticsearch, never()).fieldCaps(any(FieldCapsRequest.class));
     }
 
+    @Test
+    void readsTheNasAddressOfTheLatestSessionWhereTheReportedDaysIndexHoldsNone() throws Exception {
+        // The bug this exists for: a session document is filed under the day its session started,
+        // so the reported day's index is not "that day's sessions". A line that came up this
+        // morning is in today's index and one that came up last week and has not dropped since is
+        // in last week's — neither is in D-1's, so the filter found no address while UTLIZED_QUOTA
+        // beside it reported that very session's usage out of the same scan.
+        ElasticsearchClient elasticsearch = mock(ElasticsearchClient.class);
+        when(clientProvider.getIfAvailable()).thenReturn(elasticsearch);
+        when(elasticsearch.fieldCaps(any(FieldCapsRequest.class)))
+                .thenReturn(mappingWith("nasIpAddress.keyword", true));
+
+        String request = firstRequestOf(elasticsearch, LocalDate.of(2026, 9, 15));
+
+        assertTrue(request.contains("\"latest_day\""),
+                "the newest index the user appears in is read beside the reported day's");
+        assertTrue(request.contains("\"field\":\"_index\""),
+                "which is a terms aggregation on the index each session document landed in");
+        assertTrue(request.contains("\"order\":[{\"_key\":\"desc\"}]"),
+                "ordered by name, since the daily names sort by date — the newest index, not the "
+                        + "busiest, which is the many-year NAS the reported day's filter exists "
+                        + "to keep out of the column");
+    }
+
+    @Test
+    void fillsTheColumnFromTheLatestSessionForAUserTheReportedDayHasNoSessionOf() throws Exception {
+        ElasticsearchClient elasticsearch = mock(ElasticsearchClient.class);
+        when(clientProvider.getIfAvailable()).thenReturn(elasticsearch);
+        when(elasticsearch.fieldCaps(any(FieldCapsRequest.class)))
+                .thenReturn(mappingWith("nasIpAddress.keyword", true));
+        when(elasticsearch.search(any(SearchRequest.class), any(Class.class)))
+                .thenReturn(responseOf(aUserAnchoredOn(null, "192.168.239.85")));
+
+        UserUsageCursor.UserUsage usage =
+                client.open(LocalDate.of(2026, 9, 15), null, null).forUser("taiwowilliams");
+
+        assertEquals("192.168.239.85", usage.nasIpAddress(),
+                "the address the cluster holds for them, rather than the empty column a row "
+                        + "reporting their usage was written with");
+        assertTrue(usage.nasIpFromAnotherDay(),
+                "and the dump is told it is not the reported day's, so the shard can count it");
+        assertEquals(80L, usage.total(), "the usage beside it is unchanged");
+    }
+
+    @Test
+    void theReportedDaysOwnAddressStillWinsWhereThatDayHasOne() throws Exception {
+        ElasticsearchClient elasticsearch = mock(ElasticsearchClient.class);
+        when(clientProvider.getIfAvailable()).thenReturn(elasticsearch);
+        when(elasticsearch.fieldCaps(any(FieldCapsRequest.class)))
+                .thenReturn(mappingWith("nasIpAddress.keyword", true));
+        when(elasticsearch.search(any(SearchRequest.class), any(Class.class)))
+                .thenReturn(responseOf(aUserAnchoredOn("10.20.30.40", "192.168.239.85")));
+
+        UserUsageCursor.UserUsage usage =
+                client.open(LocalDate.of(2026, 9, 15), null, null).forUser("taiwowilliams");
+
+        assertEquals("10.20.30.40", usage.nasIpAddress(),
+                "NAS_IP_ADDRESS is the reported day's wherever that day names one; the fallback "
+                        + "fills the column, it does not take it over");
+        assertFalse(usage.nasIpFromAnotherDay());
+    }
+
+    @Test
+    void aUserWithNoSessionAnywhereInTheScanStillReportsNoAddressAtAll() throws Exception {
+        ElasticsearchClient elasticsearch = mock(ElasticsearchClient.class);
+        when(clientProvider.getIfAvailable()).thenReturn(elasticsearch);
+        when(elasticsearch.fieldCaps(any(FieldCapsRequest.class)))
+                .thenReturn(mappingWith("nasIpAddress.keyword", true));
+        when(elasticsearch.search(any(SearchRequest.class), any(Class.class)))
+                .thenReturn(responseOf(aUserAnchoredOn(null, null)));
+
+        UserUsageCursor.UserUsage usage =
+                client.open(LocalDate.of(2026, 9, 15), null, null).forUser("taiwowilliams");
+
+        assertNull(usage.nasIpAddress(),
+                "a subscriber whose sessions named no NAS has no address to fall back to either");
+        assertFalse(usage.nasIpFromAnotherDay(),
+                "an empty column is not a column filled from another day");
+    }
+
+    @Test
+    void theReportedDayCanBeMadeTheOnlySourceAgain() throws Exception {
+        ElasticsearchClient elasticsearch = mock(ElasticsearchClient.class);
+        when(clientProvider.getIfAvailable()).thenReturn(elasticsearch);
+        when(elasticsearch.fieldCaps(any(FieldCapsRequest.class)))
+                .thenReturn(mappingWith("nasIpAddress.keyword", true));
+        properties.getUsage().setNasIpFallbackToLatestDay(false);
+
+        String request = firstRequestOf(elasticsearch, LocalDate.of(2026, 9, 15));
+
+        assertTrue(request.contains("\"reported_day\""),
+                "the reported day's filter is what the column is read through either way");
+        assertFalse(request.contains("\"latest_day\""),
+                "and nothing beside it is asked of the cluster when the fallback is off");
+    }
+
+    @Test
+    void theBucketExtractPaysForNeitherDaysAggregation() throws Exception {
+        // It has no reported day and no NAS column, so both the filter and the fallback beside it
+        // are left out of the request rather than run per user across the whole keyspace.
+        ElasticsearchClient elasticsearch = mock(ElasticsearchClient.class);
+        when(clientProvider.getIfAvailable()).thenReturn(elasticsearch);
+        when(elasticsearch.search(any(SearchRequest.class), any(Class.class)))
+                .thenThrow(new IOException("no cluster behind this test"));
+
+        assertThrows(ReportClientException.class,
+                () -> client.openBucketTotals(null, null).forUser("taiwowilliams"));
+
+        ArgumentCaptor<SearchRequest> captured = ArgumentCaptor.forClass(SearchRequest.class);
+        verify(elasticsearch).search(captured.capture(), any(Class.class));
+        String request = asJson(captured.getValue());
+
+        assertFalse(request.contains("\"reported_day\""));
+        assertFalse(request.contains("\"latest_day\""));
+    }
+
     /** A field capabilities answer from one index that maps {@code field} and nothing else. */
     private FieldCapsResponse mappingWith(String field, boolean aggregatable) {
         return FieldCapsResponse.of(r -> r
@@ -324,11 +443,96 @@ class UsageAggregationClientTest {
         ArgumentCaptor<SearchRequest> captured = ArgumentCaptor.forClass(SearchRequest.class);
         verify(elasticsearch).search(captured.capture(), any(Class.class));
 
+        return asJson(captured.getValue());
+    }
+
+    /** A search request as it goes over the wire. */
+    private String asJson(SearchRequest request) {
         JsonpMapper mapper = new JacksonJsonpMapper();
         StringWriter writer = new StringWriter();
         try (JsonGenerator generator = mapper.jsonProvider().createGenerator(writer)) {
-            mapper.serialize(captured.getValue(), generator);
+            mapper.serialize(request, generator);
         }
         return writer.toString();
+    }
+
+    /**
+     * One composite bucket for {@code taiwowilliams}, who drew 80 bytes on the bundle's quota
+     * bucket: {@code reportedDay} is the address the reported day's index names for them and
+     * {@code latestDay} the one the newest index they appear in does, either of them null for a
+     * day that names none.
+     *
+     * <p>Written as the cluster answers it, typed keys and all, because it is the answer's shape
+     * that the fallback turns on: the filter comes back with no terms for a user whose session
+     * document was filed under another day, which is exactly what a user with no NAS at all looks
+     * like under it.
+     */
+    private String aUserAnchoredOn(String reportedDay, String latestDay) {
+        return """
+                {
+                  "took": 7,
+                  "timed_out": false,
+                  "_shards": {"total": 2, "successful": 2, "skipped": 0, "failed": 0},
+                  "hits": {"total": {"value": 0, "relation": "eq"}, "hits": []},
+                  "aggregations": {
+                    "composite#by_user": {
+                      "after_key": {"user": "taiwowilliams"},
+                      "buckets": [{
+                        "key": {"user": "taiwowilliams"},
+                        "doc_count": 2,
+                        "filter#reported_day": {"doc_count": %d, "sterms#nas_ip": %s},
+                        "sterms#latest_day": {
+                          "doc_count_error_upper_bound": 0,
+                          "sum_other_doc_count": 0,
+                          "buckets": [{
+                            "key": "radius-sessions-2026.09.16",
+                            "doc_count": 2,
+                            "sterms#nas_ip": %s
+                          }]
+                        },
+                        "nested#instances": {
+                          "doc_count": 2,
+                          "sterms#by_bucket": {
+                            "doc_count_error_upper_bound": 0,
+                            "sum_other_doc_count": 0,
+                            "buckets": [{
+                              "key": "4444913775",
+                              "doc_count": 2,
+                              "sum#usage": {"value": 80.0},
+                              "sterms#by_service": {
+                                "doc_count_error_upper_bound": 0,
+                                "sum_other_doc_count": 0,
+                                "buckets": [{
+                                  "key": "4444827954",
+                                  "doc_count": 2,
+                                  "sum#usage": {"value": 80.0}
+                                }]
+                              }
+                            }]
+                          }
+                        }
+                      }]
+                    }
+                  }
+                }
+                """.formatted(reportedDay == null ? 0 : 2, addresses(reportedDay), addresses(latestDay));
+    }
+
+    /** A terms aggregate naming one address, or the empty one a day with no sessions answers with. */
+    private String addresses(String nasIpAddress) {
+        String buckets = nasIpAddress == null
+                ? ""
+                : "{\"key\": \"" + nasIpAddress + "\", \"doc_count\": 2}";
+        return "{\"doc_count_error_upper_bound\": 0, \"sum_other_doc_count\": 0, "
+                + "\"buckets\": [" + buckets + "]}";
+    }
+
+    /** A search response as the client deserializes one off the wire. */
+    private SearchResponse<Void> responseOf(String json) {
+        JsonpMapper mapper = new JacksonJsonpMapper();
+        try (JsonParser parser = mapper.jsonProvider().createParser(new StringReader(json))) {
+            return SearchResponse.createSearchResponseDeserializer(
+                    JsonpDeserializer.<Void>fixedValue(null)).deserialize(parser, mapper);
+        }
     }
 }
