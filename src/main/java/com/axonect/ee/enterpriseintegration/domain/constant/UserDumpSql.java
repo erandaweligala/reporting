@@ -2,6 +2,7 @@ package com.axonect.ee.enterpriseintegration.domain.constant;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * The single Oracle statement behind the USER_DATA_DUMP report.
@@ -20,6 +21,18 @@ import java.util.List;
  *       pivot reports is the column the dump asks of that bucket: PLAN_BANDWIDTH is the bandwidth
  *       bucket's RULE — the rate the plan grants — and QUOTA the quota bucket's INITIAL_BALANCE.</li>
  * </ul>
+ *
+ * <p><b>Which bucket PLAN_BANDWIDTH is the RULE of.</b> The bandwidth bucket where the bundle has
+ * one, and the bundle's own buckets otherwise. A pivot that names a bucket type no row carries is
+ * not an error the run can see — it is a NULL, and it is what left PLAN_BANDWIDTH empty on every
+ * row of a dump whose BUCKET_INSTANCE rows all held a RULE: a deployment that keeps one bucket per
+ * bundle carries the rate rule on that bucket, whatever {@code bandwidth-bucket-type} is set to,
+ * and one that spells the type {@code Bandwidth} never met the configured {@code BANDWIDTH} at all.
+ * Both are answered here. The type comparison is made on normalised text ({@link #BUCKET_TYPE}),
+ * so case and padding no longer decide whether a bucket is found, and the pivot falls back to the
+ * RULE the service's buckets do carry — the bundle's own buckets and no one else's, since the join
+ * to {@code svc} has already pruned the aggregate to this service instance. A deployment with a
+ * real bandwidth bucket is unaffected: its pivot matches, and the fallback is never reached.
  *
  * <p>The MAC addresses are the one satellite table that is <em>not</em> folded into an aggregate.
  * AAA_USER_MAC_ADDRESS is joined row for row and the cursor therefore hands out one row per MAC
@@ -77,6 +90,20 @@ public final class UserDumpSql {
      */
     public static final int COL_SERVICE_ID = 39;
 
+    /**
+     * How a bucket's type is compared with the configured one: on its normalised text, never on
+     * the column as it stands.
+     *
+     * <p>BUCKET_TYPE carries whatever case and padding the plan was defined with — the CDR side of
+     * this same pair of settings has matched it with {@code equalsIgnoreCase} for exactly that
+     * reason — and an equality test against the configured {@code BANDWIDTH} misses a row holding
+     * {@code Bandwidth} as completely as it misses a row holding nothing at all. A pivot that
+     * matches no row is not an error anywhere: it is a NULL, and the column it fills reaches the
+     * CSV empty on every row of the run. The bind is normalised the same way by
+     * {@link #bucketType}, so both sides of the comparison are the one spelling.
+     */
+    private static final String BUCKET_TYPE = "UPPER(TRIM(b.BUCKET_TYPE))";
+
     private UserDumpSql() {
     }
 
@@ -108,8 +135,12 @@ public final class UserDumpSql {
      * @param dayStart        start of the reported day (inclusive)
      * @param dayEnd          start of the following day (exclusive)
      * @param bandwidthBucket BUCKET_INSTANCE.BUCKET_TYPE of the bucket whose RULE is the plan
-     *                        bandwidth
-     * @param quotaBucket     BUCKET_INSTANCE.BUCKET_TYPE holding the data quota
+     *                        bandwidth, matched without regard to case or padding. A bundle with
+     *                        no bucket of that type reports the RULE its own buckets carry — see
+     *                        the note on the class — so null or blank means "whichever bucket
+     *                        holds the rule"
+     * @param quotaBucket     BUCKET_INSTANCE.BUCKET_TYPE holding the data quota, matched the same
+     *                        way
      * @param dateFormat      Oracle format model applied to every timestamp column
      */
     public static SqlStatement build(String usernameFrom,
@@ -140,19 +171,23 @@ public final class UserDumpSql {
            .append("), bkt AS (")
            .append(" SELECT b.SERVICE_ID,")
            // The bandwidth the plan grants is the bucket's RULE — the rate rule the bucket is
-           // policed by — not its BUCKET_ID, which names the bucket the rule belongs to.
-           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.RULE END) AS PLAN_BANDWIDTH,")
+           // policed by — not its BUCKET_ID, which names the bucket the rule belongs to. The
+           // bandwidth bucket is asked first; where the bundle has no bucket of that type, the
+           // RULE its own buckets carry is the answer rather than an empty column. See the note
+           // on the class.
+           .append("        NVL(MAX(CASE WHEN ").append(BUCKET_TYPE).append(" = ? THEN b.RULE END),")
+           .append("            MAX(b.RULE)) AS PLAN_BANDWIDTH,")
            // An unlimited bucket has no balance to report, and the consumer reads an empty QUOTA
            // as "no cap" — so it is filtered out here rather than labelled.
-           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? AND NVL(b.IS_UNLIMITED, 0) <> 1")
+           .append("        MAX(CASE WHEN ").append(BUCKET_TYPE).append(" = ? AND NVL(b.IS_UNLIMITED, 0) <> 1")
            .append("                 THEN TO_CHAR(b.INITIAL_BALANCE) END) AS QUOTA,")
-           .append("        MAX(CASE WHEN b.BUCKET_TYPE = ? THEN b.BUCKET_ID END) AS QUOTA_BUCKET_ID")
+           .append("        MAX(CASE WHEN ").append(BUCKET_TYPE).append(" = ? THEN b.BUCKET_ID END) AS QUOTA_BUCKET_ID")
            .append(" FROM BUCKET_INSTANCE b JOIN svc ON svc.ID = b.SERVICE_ID")
            .append(" GROUP BY b.SERVICE_ID")
            .append(")");
-        params.add(bandwidthBucket);
-        params.add(quotaBucket);
-        params.add(quotaBucket);
+        params.add(bucketType(bandwidthBucket));
+        params.add(bucketType(quotaBucket));
+        params.add(bucketType(quotaBucket));
 
         sql.append(" SELECT u.USER_NAME, u.BANDWIDTH AS GROUP_BANDWIDTH, u.BILLING, u.BILLING_ACCOUNT_REF, u.CIRCUIT_ID,")
            .append("        u.CONCURRENCY, u.CONTACT_EMAIL, u.CONTACT_NAME, u.CONTACT_NUMBER,")
@@ -204,6 +239,23 @@ public final class UserDumpSql {
      */
     private static String asText(String column, String format, String alias) {
         return OracleText.timestampAsText(column, format, alias);
+    }
+
+    /**
+     * The configured bucket type as it is compared: trimmed and upper-cased, to meet the column
+     * {@link #BUCKET_TYPE} normalises the same way.
+     *
+     * <p>A type that is not configured at all becomes the empty string, which Oracle holds as NULL
+     * and therefore compares equal to nothing — which is what an unset type should mean: a
+     * deployment naming no bandwidth bucket reports whatever RULE the bundle's buckets carry (see
+     * the NVL in {@link #build}), and one naming no quota bucket reports an empty QUOTA rather than
+     * some arbitrary bucket's balance. It is the empty string rather than a Java null because the
+     * reader binds every parameter with {@code setObject}, and a bare null there is a value the
+     * driver has no type for — one more way for a missing setting to fail the whole dump instead
+     * of one column.
+     */
+    private static String bucketType(String configured) {
+        return configured == null ? "" : configured.trim().toUpperCase(Locale.ROOT);
     }
 
     private static void appendWhereRange(StringBuilder sql, List<Object> params, String column,
