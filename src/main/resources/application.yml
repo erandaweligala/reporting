@@ -203,6 +203,14 @@ report:
       - PLAN_TO_BUCKET
       - BUCKET_INSTANCE
     created-by: SCHEDULER
+    # Every instance fires the job; at each firing they race for one row of the ShedLock table in
+    # Oracle, and only the one that takes it files the requests. One statement per instance per
+    # firing, timed by the database's clock. The table has to exist — see docs/scheduled-dumps.md.
+    lock:
+      enabled: ${SCHEDULED_DUMP_LOCK_ENABLED:true}  # false: single instance only, no table needed
+      table-name: SHEDLOCK
+      at-least-for: 10m          # held this long however fast the firing is; covers late firers
+      at-most-for: 30m           # released by then even if the instance holding it died
 
   # MAC_SERVICE_TABLE, PLAN_TO_BUCKET and BUCKET_INSTANCE: whole-table extracts, as CSV.
   # One cursor and one sequential pass per extract; the knobs below are what bound its footprint.

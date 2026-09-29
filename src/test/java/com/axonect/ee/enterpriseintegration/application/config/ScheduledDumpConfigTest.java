@@ -12,7 +12,9 @@ import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 import org.springframework.scheduling.support.CronTrigger;
 import org.springframework.scheduling.support.SimpleTriggerContext;
 
+import javax.sql.DataSource;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -39,7 +41,7 @@ class ScheduledDumpConfigTest {
     private final ScheduledDumpProperties properties = new ScheduledDumpProperties();
     private final UserDumpProperties userDumpProperties = new UserDumpProperties();
     private final ScheduledDumpJob job = mock(ScheduledDumpJob.class);
-    private final ScheduledDumpConfig config = new ScheduledDumpConfig(properties, userDumpProperties, job);
+    private final ScheduledDumpConfig config = new ScheduledDumpConfig(properties, userDumpProperties, job, mock(DataSource.class));
     private final ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
 
     private MockedStatic<ReportDefinitionsRegistry> registry;
@@ -161,6 +163,27 @@ class ScheduledDumpConfigTest {
         IllegalStateException e = assertThrows(IllegalStateException.class, () -> config.configureTasks(registrar));
 
         assertTrue(e.getMessage().contains("report.scheduled-dump.zone"), e.getMessage());
+    }
+
+    @Test
+    void failsTheStartOnALockHeldLongerAtLeastThanAtMost() {
+        properties.getLock().setAtLeastFor(Duration.ofMinutes(40));
+        properties.getLock().setAtMostFor(Duration.ofMinutes(30));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> config.configureTasks(registrar));
+
+        assertTrue(e.getMessage().contains("report.scheduled-dump.lock.at-least-for"), e.getMessage());
+    }
+
+    @Test
+    void doesNotCheckTheLockTimesWhenTheLockIsOff() {
+        properties.getLock().setEnabled(false);
+        properties.getLock().setAtLeastFor(Duration.ofMinutes(40));
+        properties.getLock().setAtMostFor(Duration.ofMinutes(30));
+
+        config.configureTasks(registrar);
+
+        onlyTask();
     }
 
     private CronTask onlyTask() {

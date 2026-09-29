@@ -4,13 +4,16 @@ import com.axonect.ee.enterpriseintegration.domain.service.impl.ScheduledDumpJob
 import com.axonect.ee.enterpriseintegration.domain.util.ReportDefinitionsRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.SchedulingConfigurer;
 import org.springframework.scheduling.config.CronTask;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.scheduling.support.CronTrigger;
 
+import javax.sql.DataSource;
 import java.time.DateTimeException;
+import java.time.Duration;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.List;
@@ -35,13 +38,16 @@ public class ScheduledDumpConfig implements SchedulingConfigurer {
     private final ScheduledDumpProperties properties;
     private final UserDumpProperties userDumpProperties;
     private final ScheduledDumpJob job;
+    private final DataSource dataSource;
 
     public ScheduledDumpConfig(ScheduledDumpProperties properties,
                                UserDumpProperties userDumpProperties,
-                               ScheduledDumpJob job) {
+                               ScheduledDumpJob job,
+                               DataSource dataSource) {
         this.properties = properties;
         this.userDumpProperties = userDumpProperties;
         this.job = job;
+        this.dataSource = dataSource;
     }
 
     @Override
@@ -60,11 +66,49 @@ public class ScheduledDumpConfig implements SchedulingConfigurer {
         String cron = properties.getCron() == null ? "" : properties.getCron().trim();
         CronExpression expression = cronExpression(cron);
         ZoneId zone = zone();
+        String lock = lock();
 
         registrar.addCronTask(new CronTask(() -> job.run(reportTypes), new CronTrigger(cron, zone)));
 
-        log.info("Scheduled dumps are on: {} at '{}' in {}, first run at {}",
-                reportTypes, cron, zone, expression.next(ZonedDateTime.now(zone)));
+        log.info("Scheduled dumps are on: {} at '{}' in {}, first run at {}; {}",
+                reportTypes, cron, zone, expression.next(ZonedDateTime.now(zone)), lock);
+    }
+
+    /** Checks the lock settings and says, for the startup log, how a firing is shared out. */
+    private String lock() {
+        ScheduledDumpProperties.Lock lock = properties.getLock();
+        if (!lock.isEnabled()) {
+            return "no lock (" + PREFIX + ".lock.enabled is false): every instance runs every firing";
+        }
+
+        Duration atLeastFor = lock.getAtLeastFor();
+        Duration atMostFor = lock.getAtMostFor();
+        if (atLeastFor == null || atMostFor == null || atLeastFor.isNegative() || !atMostFor.isPositive()
+                || atLeastFor.compareTo(atMostFor) > 0) {
+            throw new IllegalStateException(PREFIX + ".lock.at-least-for (" + atLeastFor + ") and "
+                    + PREFIX + ".lock.at-most-for (" + atMostFor + ") must be durations with at-least-for "
+                    + "no longer than at-most-for");
+        }
+        checkLockTable(lock.getTableName());
+        return "one instance per firing, through the lock in " + lock.getTableName()
+                + ", held " + atLeastFor + " to " + atMostFor;
+    }
+
+    /**
+     * Looks for the lock table once, so that a deployment without it hears so at startup rather
+     * than at the first firing, when every instance would log that it could not take the lock and
+     * none would request the dumps. It warns rather than failing the start: a database that is
+     * briefly out of reach now says nothing about the table.
+     */
+    private void checkLockTable(String tableName) {
+        try {
+            new JdbcTemplate(dataSource).queryForObject("SELECT COUNT(*) FROM " + tableName + " WHERE 1 = 0",
+                    Integer.class);
+        } catch (Exception e) {
+            log.warn("Scheduled dumps: the lock table {} could not be read ({}). No instance will request "
+                            + "the dumps until it exists — see docs/scheduled-dumps.md for its DDL",
+                    tableName, e.getMessage());
+        }
     }
 
     /**

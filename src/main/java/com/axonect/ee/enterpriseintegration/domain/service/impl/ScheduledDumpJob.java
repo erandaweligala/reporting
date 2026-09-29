@@ -4,9 +4,14 @@ import com.axonect.ee.enterpriseintegration.application.config.ScheduledDumpProp
 import com.axonect.ee.enterpriseintegration.domain.entity.DownloadReportRequest;
 import com.axonect.ee.enterpriseintegration.domain.service.DownloadReportService;
 import lombok.extern.slf4j.Slf4j;
+import net.javacrumbs.shedlock.core.LockConfiguration;
+import net.javacrumbs.shedlock.core.LockProvider;
+import net.javacrumbs.shedlock.core.SimpleLock;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * One firing of the scheduled dumps: a report request per report type, filed the way the create
@@ -20,20 +25,61 @@ import java.util.List;
  *
  * <p>Report types are requested independently: one that cannot be requested is logged and the rest
  * are still requested, rather than a bad night for one file costing all four.
+ *
+ * <p>Every instance of the service fires the job, and only the one that takes the lock files the
+ * requests; the others stand down. A lock that cannot be read at all — the database unreachable,
+ * the table missing — stands the instance down too, since filing the requests anyway is what would
+ * run the dumps once per instance.
  */
 @Component
 @Slf4j
 public class ScheduledDumpJob {
 
+    /** Name of the lock row, the same on every instance. */
+    static final String LOCK_NAME = "scheduled-dump";
+
     private final DownloadReportService downloadReportService;
     private final ScheduledDumpProperties properties;
+    private final LockProvider lockProvider;
 
-    public ScheduledDumpJob(DownloadReportService downloadReportService, ScheduledDumpProperties properties) {
+    public ScheduledDumpJob(DownloadReportService downloadReportService,
+                            ScheduledDumpProperties properties,
+                            LockProvider lockProvider) {
         this.downloadReportService = downloadReportService;
         this.properties = properties;
+        this.lockProvider = lockProvider;
     }
 
     public void run(List<String> reportTypes) {
+        ScheduledDumpProperties.Lock lockSettings = properties.getLock();
+        if (!lockSettings.isEnabled()) {
+            requestAll(reportTypes);
+            return;
+        }
+
+        Optional<SimpleLock> lock;
+        try {
+            lock = lockProvider.lock(new LockConfiguration(Instant.now(), LOCK_NAME,
+                    lockSettings.getAtMostFor(), lockSettings.getAtLeastFor()));
+        } catch (Exception e) {
+            log.error("Scheduled dumps: could not read the lock in {}; nothing requested by this instance",
+                    lockSettings.getTableName(), e);
+            return;
+        }
+
+        if (lock.isEmpty()) {
+            log.info("Scheduled dumps: another instance holds the lock and is requesting them; standing down");
+            return;
+        }
+
+        try {
+            requestAll(reportTypes);
+        } finally {
+            lock.get().unlock();
+        }
+    }
+
+    private void requestAll(List<String> reportTypes) {
         log.info("Scheduled dumps: requesting {} as {}", reportTypes, properties.getCreatedBy());
 
         int requested = 0;

@@ -6,6 +6,7 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -56,4 +57,42 @@ public class ScheduledDumpProperties {
 
     /** CREATED_BY recorded on every request the job creates. */
     private String createdBy = "SCHEDULER";
+
+    /** Which of several instances runs a firing. */
+    private Lock lock = new Lock();
+
+    /**
+     * Every instance with the job enabled fires it, so without this each would file its own four
+     * requests. At each firing the instances race for one row of {@link #tableName} in Oracle; the
+     * one that takes it files the requests and the others log that they stood down. The race is a
+     * single statement per instance per firing, and the lock times are taken from the database's
+     * clock rather than the pods', so instances whose clocks disagree still see the same lock.
+     */
+    @Data
+    public static class Lock {
+
+        /**
+         * Off only for a deployment that runs one instance and has no lock table: every instance
+         * then runs every firing.
+         */
+        private boolean enabled = true;
+
+        /** The ShedLock table. See docs/scheduled-dumps.md for its DDL. */
+        private String tableName = "SHEDLOCK";
+
+        /**
+         * How long the lock is held however quickly the firing finishes. Filing four requests takes
+         * well under a second, so this is what keeps an instance that fires late — its scheduler
+         * thread busy with the watchdog at 00:30 — from finding the lock free and firing again. It
+         * has to be shorter than the time between two firings.
+         */
+        private Duration atLeastFor = Duration.ofMinutes(10);
+
+        /**
+         * How long the lock is held at most, should the instance holding it die before letting it
+         * go. It is not how long the dumps may run: the lock covers filing the requests, not
+         * generating the files.
+         */
+        private Duration atMostFor = Duration.ofMinutes(30);
+    }
 }

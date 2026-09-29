@@ -28,20 +28,25 @@ Under `report.scheduled-dump` in `application.yml`:
 | `zone` | `SCHEDULED_DUMP_ZONE` | *(empty)* | Zone the cron is read in. When empty it follows `report.user-dump.timezone`, which is the zone `USER_DATA_DUMP` resolves D-1 in. A run at 00:30 then reports on the day that has just ended. |
 | `report-types` | — | the four dumps | What is requested at each firing, in this order. |
 | `created-by` | — | `SCHEDULER` | `CREATED_BY` on every request the job files. |
+| `lock.enabled` | `SCHEDULED_DUMP_LOCK_ENABLED` | `true` | Lets only one instance run each firing. See [Running several instances](#running-several-instances). |
+| `lock.table-name` | — | `SHEDLOCK` | The lock table. |
+| `lock.at-least-for` | — | `10m` | How long the lock is held, however quickly the firing finishes. |
+| `lock.at-most-for` | — | `30m` | When the lock is released if the instance holding it dies. |
 
 Everything is read at startup. Switching the job on or off, or moving it, is a configuration change
 and a restart, not a code change. The environment variables let a deployment make it without
 editing `application.yml`.
 
 A configuration that cannot be what was meant fails the start with the property named. That covers
-a cron that does not parse, a zone that does not exist, and a report type the service does not
-produce. Without this check, the mistake would only show up as a night without dumps. A five-field
-Unix cron (`30 0 * * *`) is one of these: Spring expects the seconds field first.
+a cron that does not parse, a zone that does not exist, a report type the service does not
+produce, and an `at-least-for` longer than `at-most-for`. Without this check, the mistake would
+only show up as a night without dumps. A five-field Unix cron (`30 0 * * *`) is one of these:
+Spring expects the seconds field first.
 
 The startup log says what was decided:
 
 ```
-Scheduled dumps are on: [USER_DATA_DUMP, MAC_SERVICE_TABLE, PLAN_TO_BUCKET, BUCKET_INSTANCE] at '0 30 0 * * *' in Asia/Colombo, first run at 2026-09-30T00:30+05:30[Asia/Colombo]
+Scheduled dumps are on: [USER_DATA_DUMP, MAC_SERVICE_TABLE, PLAN_TO_BUCKET, BUCKET_INSTANCE] at '0 30 0 * * *' in Asia/Colombo, first run at 2026-09-30T00:30+05:30[Asia/Colombo]; one instance per firing, through the lock in SHEDLOCK, held PT10M to PT30M
 ```
 
 or
@@ -60,11 +65,54 @@ Scheduled dumps are off: report.scheduled-dump.enabled is false
 | Read the cron in a zone other than the dump's | `SCHEDULED_DUMP_ZONE=Asia/Colombo` |
 | Only the table extracts | `report-types: [MAC_SERVICE_TABLE, PLAN_TO_BUCKET, BUCKET_INSTANCE]` |
 
+## Running several instances
+
+Every instance with the job enabled fires it at 00:30. Only one of them files the four requests.
+At each firing the instances race for one row of the `SHEDLOCK` table in Oracle, through
+[ShedLock](https://github.com/lukas-krecan/ShedLock):
+
+- **The instance that takes the row** files the requests.
+- **The others** log `another instance holds the lock and is requesting them; standing down` and
+  do nothing.
+
+The race costs one statement per instance per firing, and nothing between firings. Lock times
+come from the database's clock, not each pod's, so pods whose clocks disagree still see the same
+lock.
+
+The lock is held for at least `at-least-for` (10 minutes), even though filing the requests takes
+under a second. An instance that fires a few minutes late therefore still finds the lock taken
+and does not file a second set. That can happen when its scheduler thread is busy with the
+watchdog at 00:30. `at-least-for` has to be shorter than the time between two firings.
+
+The lock covers filing the requests, not generating the files. The dumps themselves are then
+dispatched as usual.
+
+### The lock table
+
+It is not created by the application. Create it once in the schema the service connects to:
+
+```sql
+CREATE TABLE SHEDLOCK (
+  NAME       VARCHAR2(64)  NOT NULL,
+  LOCK_UNTIL TIMESTAMP(3)  NOT NULL,
+  LOCKED_AT  TIMESTAMP(3)  NOT NULL,
+  LOCKED_BY  VARCHAR2(255) NOT NULL,
+  CONSTRAINT SHEDLOCK_PK PRIMARY KEY (NAME)
+);
+```
+
+It holds one row, `NAME = 'scheduled-dump'`.
+
+If the table is missing, the service warns at startup:
+`the lock table SHEDLOCK could not be read`. At each firing every instance then logs
+`could not read the lock` and files nothing. Missing the dumps is safer than running them once
+per instance.
+
+For a deployment that runs exactly one instance, `SCHEDULED_DUMP_LOCK_ENABLED=false` turns the
+lock off and no table is needed.
+
 ## Things to know
 
-- **One instance should run it.** Every instance with the job enabled fires it, and each one files
-  its own four requests. With more than one replica, enable it on one of them only. If every
-  replica has to carry the same configuration, the job needs a shared lock first.
 - **The four dumps take four of the five report slots.** A report requested by hand while they are
   running waits as `Pending` if the fifth slot is taken.
 - **`USER_DATA_DUMP` reports D-1 in `report.user-dump.timezone`**, whenever the job fires. If
