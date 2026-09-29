@@ -124,6 +124,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
+        <!-- ShedLock: lets one instance of several run the scheduled dumps, through a row in Oracle -->
+        <dependency>
+            <groupId>net.javacrumbs.shedlock</groupId>
+            <artifactId>shedlock-provider-jdbc-template</artifactId>
+            <version>5.16.0</version>
+        </dependency>
 
         <dependency>
             <groupId>org.apache.httpcomponents</groupId>
