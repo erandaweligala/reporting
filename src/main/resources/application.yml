@@ -184,6 +184,26 @@ report:
     stale-threshold-minutes: 20
     check-interval-ms: 1200000   # 20 * 60 * 1000
 
+  # The nightly dumps, generated without anyone requesting them. Each firing files one report
+  # request per report type below, exactly as POST /api/report-download/create does, so the files
+  # are listed and downloaded like any other report, under created-by. It is read at startup:
+  # switching the job on or off, or moving it, is a change of configuration and a restart. The
+  # environment variables let a deployment do that without touching this file.
+  scheduled-dump:
+    enabled: ${SCHEDULED_DUMP_ENABLED:true}
+    # Spring cron, six fields: second minute hour day-of-month month day-of-week.
+    # "0 30 0 * * *" is every day at 00:30.
+    cron: "${SCHEDULED_DUMP_CRON:0 30 0 * * *}"
+    # Zone the cron is read in. Empty follows report.user-dump.timezone, the zone USER_DATA_DUMP
+    # resolves D-1 in, so a run at 00:30 reports on the day that has just ended.
+    zone: "${SCHEDULED_DUMP_ZONE:}"
+    report-types:
+      - USER_DATA_DUMP
+      - MAC_SERVICE_TABLE
+      - PLAN_TO_BUCKET
+      - BUCKET_INSTANCE
+    created-by: SCHEDULER
+
   # MAC_SERVICE_TABLE, PLAN_TO_BUCKET and BUCKET_INSTANCE: whole-table extracts, as CSV.
   # One cursor and one sequential pass per extract; the knobs below are what bound its footprint.
   table-extract:
